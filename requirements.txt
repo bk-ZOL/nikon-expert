@@ -1,0 +1,40 @@
+# Nikon Expert — Python 依赖清单
+# 安装：pip install -r requirements.txt
+
+# ── RAG 框架 ────────────────────────────────────────────
+llama-index==0.10.67
+llama-index-llms-ollama
+llama-index-embeddings-huggingface
+llama-index-vector-stores-qdrant
+llama-index-postprocessor-flag-embedding-reranker
+
+# ── 向量数据库 ───────────────────────────────────────────
+qdrant-client>=1.9
+
+# ── 文档解析 ─────────────────────────────────────────────
+pymupdf4llm>=0.0.17
+pdfplumber>=0.11
+openpyxl>=3.1
+python-docx>=1.1
+
+# ── Embedding / Reranker ─────────────────────────────────
+FlagEmbedding>=1.2
+sentence-transformers>=3.0
+transformers>=4.40
+huggingface_hub>=0.23
+
+# ── 深度学习（MPS 加速，Apple Silicon）─────────────────
+torch  # 通过 setup.sh 安装，指定 --index-url
+
+# ── API & UI ──────────────────────────────────────────────
+fastapi>=0.111
+uvicorn[standard]
+gradio>=4.36
+pydantic>=2.7
+
+# ── 工具 ─────────────────────────────────────────────────
+python-dotenv
+pyyaml
+loguru
+tqdm
+pandas

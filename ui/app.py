@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""
+Nikon Expert — Gradio 工程师交互界面
+用法：python ui/app.py
+然后在浏览器打开：http://localhost:7860
+"""
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+from dotenv import load_dotenv
+load_dotenv()
+
+import pandas as pd
+import requests as _requests
+import gradio as gr
+from src.engine import (
+    query, _init_engine, engine_db_status,
+    switch_llm, get_current_model,
+    ingest_file, get_kb_documents, delete_document,
+)
+
+# ── 预加载引擎（避免首次查询等待过长）──────────────────────────
+print("⚙️  正在加载 Nikon Expert 引擎，请稍候...")
+_init_engine()
+print("✅ 引擎就绪！\n")
+
+
+# ── 回调函数 ─────────────────────────────────────────────────────
+def chat(question: str, mode: str, history: list):
+    if not question.strip():
+        return history, ""
+    mode_key = "troubleshoot" if "故障" in mode else "qa"
+    result = query(question, mode=mode_key)
+    if result["has_result"]:
+        sources = "\n\n**📚 参考来源：**\n" + "\n".join(f"- {c}" for c in result["citations"])
+        bot_msg = result["answer"] + sources
+    else:
+        bot_msg = result["answer"]
+    history = history or []
+    history.append({"role": "user", "content": question})
+    history.append({"role": "assistant", "content": bot_msg})
+    return history, ""
+
+
+def get_db_status():
+    s = engine_db_status()
+    if s["status"] == "ok":
+        return f"✅ 知识库正常 | 向量数：{s['points']:,} | Collection：{s['collection']}"
+    return f"⚠️ 知识库异常：{s['status']}"
+
+
+def get_ollama_models():
+    try:
+        r = _requests.get("http://localhost:11434/api/tags", timeout=3)
+        return [m["name"] for m in r.json().get("models", [])]
+    except Exception:
+        return []
+
+
+def do_switch_model(model_name: str):
+    if not model_name:
+        return "⚠️ 请选择模型"
+    switch_llm(model_name)
+    return f"✅ 已切换至 **{model_name}**"
+
+
+def do_ingest_file(file_path):
+    if not file_path:
+        return "⚠️ 请先选择文件"
+    result = ingest_file(file_path)
+    return result["message"]
+
+
+def do_get_kb_docs():
+    docs = get_kb_documents()
+    return pd.DataFrame(docs) if docs else pd.DataFrame(columns=["文档名", "类型", "Chunks"])
+
+
+def do_delete_doc(doc_name: str):
+    if not doc_name.strip():
+        return "⚠️ 请输入要删除的文档名", do_get_kb_docs()
+    msg = delete_document(doc_name.strip())
+    return msg, do_get_kb_docs()
+
+
+# ── 界面布局 ─────────────────────────────────────────────────────
+with gr.Blocks(title="Nikon Expert") as demo:
+
+    gr.HTML("""
+    <div class="header">
+        <h1>🔬 Nikon Expert</h1>
+        <p style="color:#666">光刻机设备知识库 · 纯本地运行 · 零数据外传</p>
+    </div>
+    """)
+
+    with gr.Tabs():
+
+        # ── Tab 1：对话 ───────────────────────────────────────────
+        with gr.Tab("💬 对话"):
+            with gr.Row():
+                status_text = gr.Markdown(get_db_status(), elem_classes=["status-bar"])
+
+            gr.Markdown("---")
+
+            with gr.Row():
+                with gr.Column(scale=1):
+                    mode = gr.Radio(
+                        choices=["📖 知识问答", "🔧 故障排查"],
+                        value="📖 知识问答",
+                        label="查询模式",
+                    )
+                    gr.Markdown("""
+**📖 知识问答**：设备原理、调机参数、SOP
+**🔧 故障排查**：输入 Error Code 或故障现象
+                    """)
+                    gr.Markdown("---")
+                    model_dropdown = gr.Dropdown(
+                        choices=get_ollama_models(),
+                        value=get_current_model(),
+                        label="🤖 LLM 模型",
+                        interactive=True,
+                    )
+                    switch_btn = gr.Button("切换模型", size="sm")
+                    switch_status = gr.Markdown("")
+                    gr.Markdown("---")
+                    gr.Markdown("**示例问题：**")
+                    gr.Markdown("""
+- Nikon 对焦系统工作原理
+- E-5301 报警如何排查？
+- Alignment 失败的常见原因
+- PM 检查 checksheet 第5项要求
+                    """)
+
+                with gr.Column(scale=2):
+                    chatbot = gr.Chatbot(label="对话记录", height=500)
+                    with gr.Row():
+                        question = gr.Textbox(
+                            label="输入问题",
+                            placeholder="请描述故障现象、Error Code，或直接提问...",
+                            lines=2,
+                            scale=4,
+                        )
+                        send_btn = gr.Button("发送", variant="primary", scale=1)
+                    with gr.Row():
+                        clear_btn = gr.Button("清空对话", size="sm")
+                        refresh_btn = gr.Button("刷新知识库状态", size="sm")
+
+        # ── Tab 2：上传文档 ───────────────────────────────────────
+        with gr.Tab("📤 上传文档"):
+            gr.Markdown("### 上传新资料到知识库")
+            gr.Markdown("支持格式：**PDF**（手册/电路图/SOP）、**MD**（Obsidian 笔记）")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    upload_file = gr.File(
+                        label="选择文件",
+                        file_types=[".pdf", ".md"],
+                        type="filepath",
+                    )
+                    ingest_btn = gr.Button("摄入到知识库", variant="primary")
+                    ingest_status = gr.Markdown("")
+                with gr.Column(scale=1):
+                    gr.Markdown("""
+**注意事项：**
+- 纯图片扫描 PDF 无法提取文字，建议先 OCR 处理
+- 摄入大文件（>200页）需要约 1-3 分钟
+- 摄入期间可以继续使用对话功能
+- 摄入完成后立即可以被检索到
+                    """)
+
+        # ── Tab 3：知识库管理 ─────────────────────────────────────
+        with gr.Tab("📚 知识库管理"):
+            gr.Markdown("### 已收录文档")
+            with gr.Row():
+                refresh_kb_btn = gr.Button("刷新列表", size="sm")
+                kb_total = gr.Markdown("")
+            kb_table = gr.DataFrame(
+                value=do_get_kb_docs,
+                headers=["文档名", "类型", "Chunks"],
+                label="文档列表",
+                interactive=False,
+                wrap=True,
+            )
+            gr.Markdown("---")
+            gr.Markdown("### 删除文档")
+            gr.Markdown("输入文档名（与列表中「文档名」列完全一致），删除该文档的所有向量。")
+            with gr.Row():
+                del_doc_input = gr.Textbox(
+                    label="文档名",
+                    placeholder="例如：NSR-S307E Site Preparation Guide Rev. 1.3.pdf",
+                    scale=4,
+                )
+                del_btn = gr.Button("删除", variant="stop", scale=1)
+            del_status = gr.Markdown("")
+
+    # ── 事件绑定 ─────────────────────────────────────────────────
+    send_btn.click(chat, inputs=[question, mode, chatbot], outputs=[chatbot, question])
+    question.submit(chat, inputs=[question, mode, chatbot], outputs=[chatbot, question])
+    clear_btn.click(lambda: ([], ""), outputs=[chatbot, question])  # type: ignore
+    refresh_btn.click(get_db_status, outputs=[status_text])
+    switch_btn.click(do_switch_model, inputs=[model_dropdown], outputs=[switch_status])
+    ingest_btn.click(do_ingest_file, inputs=[upload_file], outputs=[ingest_status])
+    refresh_kb_btn.click(do_get_kb_docs, outputs=[kb_table])
+    del_btn.click(do_delete_doc, inputs=[del_doc_input], outputs=[del_status, kb_table])
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("UI_PORT", "7860"))
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=port,
+        share=False,
+        inbrowser=True,
+    )
