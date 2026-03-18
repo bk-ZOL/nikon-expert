@@ -157,10 +157,10 @@ def ingest_file(file_path: str) -> dict:
 
 
 def get_kb_documents() -> list:
-    """返回知识库中所有文档的统计列表。"""
+    """返回知识库中所有文档的统计列表（含文件路径）。"""
     from collections import Counter
     eng = _init_engine()
-    doc_counts, doc_types = Counter(), {}
+    doc_counts, doc_meta = Counter(), {}
     offset = None
     while True:
         points, next_offset = eng["client"].scroll(
@@ -173,12 +173,28 @@ def get_kb_documents() -> list:
         for p in points:
             name = p.payload.get("doc_name", "未知")
             doc_counts[name] += 1
-            doc_types.setdefault(name, p.payload.get("doc_type", ""))
+            if name not in doc_meta:
+                file_path    = p.payload.get("file_path", "")
+                machine_model = p.payload.get("machine_model", "")
+                doc_type     = p.payload.get("doc_type", "")
+                # 优先用存储的 file_path；PDF 用 machine_model 作目录提示
+                if file_path:
+                    location = file_path
+                elif machine_model:
+                    location = machine_model
+                else:
+                    location = "—"
+                doc_meta[name] = {"doc_type": doc_type, "location": location}
         offset = next_offset
         if next_offset is None:
             break
     return [
-        {"文档名": n, "类型": doc_types.get(n, ""), "Chunks": c}
+        {
+            "文档名": n,
+            "类型": doc_meta[n]["doc_type"],
+            "位置": doc_meta[n]["location"],
+            "Chunks": c,
+        }
         for n, c in sorted(doc_counts.items())
     ]
 

@@ -73,14 +73,24 @@ def do_ingest_file(file_path):
 
 def do_get_kb_docs():
     docs = get_kb_documents()
-    return pd.DataFrame(docs) if docs else pd.DataFrame(columns=["文档名", "类型", "Chunks"])
+    if not docs:
+        return pd.DataFrame(columns=["选择", "文档名", "类型", "位置", "Chunks"])
+    df = pd.DataFrame(docs)
+    df.insert(0, "选择", False)
+    return df
 
 
-def do_delete_doc(doc_name: str):
-    if not doc_name.strip():
-        return "⚠️ 请输入要删除的文档名", do_get_kb_docs()
-    msg = delete_document(doc_name.strip())
-    return msg, do_get_kb_docs()
+def do_delete_selected(df_data):
+    if df_data is None or len(df_data) == 0:
+        return "⚠️ 列表为空", do_get_kb_docs()
+    df = df_data if isinstance(df_data, pd.DataFrame) else pd.DataFrame(df_data)
+    selected = df[df["选择"] == True]["文档名"].tolist()
+    if not selected:
+        return "⚠️ 请先勾选要删除的文档", df
+    for name in selected:
+        delete_document(name)
+    preview = "、".join(selected[:3]) + ("..." if len(selected) > 3 else "")
+    return f"✅ 已删除 {len(selected)} 个文档：{preview}", do_get_kb_docs()
 
 
 # ── 界面布局 ─────────────────────────────────────────────────────
@@ -170,26 +180,18 @@ with gr.Blocks(title="Nikon Expert") as demo:
         # ── Tab 3：知识库管理 ─────────────────────────────────────
         with gr.Tab("📚 知识库管理"):
             gr.Markdown("### 已收录文档")
+            gr.Markdown("勾选要删除的文档，然后点击「删除选中」按钮。")
             with gr.Row():
-                refresh_kb_btn = gr.Button("刷新列表", size="sm")
-                kb_total = gr.Markdown("")
+                refresh_kb_btn = gr.Button("🔄 刷新列表", size="sm")
+                del_btn = gr.Button("🗑 删除选中", variant="stop", size="sm")
             kb_table = gr.DataFrame(
                 value=do_get_kb_docs,
-                headers=["文档名", "类型", "Chunks"],
+                datatype=["bool", "str", "str", "str", "number"],
+                column_count=(5, "fixed"),
                 label="文档列表",
-                interactive=False,
+                interactive=True,
                 wrap=True,
             )
-            gr.Markdown("---")
-            gr.Markdown("### 删除文档")
-            gr.Markdown("输入文档名（与列表中「文档名」列完全一致），删除该文档的所有向量。")
-            with gr.Row():
-                del_doc_input = gr.Textbox(
-                    label="文档名",
-                    placeholder="例如：NSR-S307E Site Preparation Guide Rev. 1.3.pdf",
-                    scale=4,
-                )
-                del_btn = gr.Button("删除", variant="stop", scale=1)
             del_status = gr.Markdown("")
 
     # ── 事件绑定 ─────────────────────────────────────────────────
@@ -200,7 +202,7 @@ with gr.Blocks(title="Nikon Expert") as demo:
     switch_btn.click(do_switch_model, inputs=[model_dropdown], outputs=[switch_status])
     ingest_btn.click(do_ingest_file, inputs=[upload_file], outputs=[ingest_status])
     refresh_kb_btn.click(do_get_kb_docs, outputs=[kb_table])
-    del_btn.click(do_delete_doc, inputs=[del_doc_input], outputs=[del_status, kb_table])
+    del_btn.click(do_delete_selected, inputs=[kb_table], outputs=[del_status, kb_table])
 
 
 if __name__ == "__main__":
