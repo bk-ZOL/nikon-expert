@@ -14,7 +14,7 @@ import pandas as pd
 import requests as _requests
 import gradio as gr
 from src.engine import (
-    query, _init_engine, engine_db_status,
+    query, query_stream, _init_engine, engine_db_status,
     switch_llm, get_current_model,
     ingest_file, get_kb_documents, delete_document,
 )
@@ -28,18 +28,30 @@ print("✅ 引擎就绪！\n")
 # ── 回调函数 ─────────────────────────────────────────────────────
 def chat(question: str, mode: str, history: list):
     if not question.strip():
-        return history, ""
+        yield (history or []), ""
+        return
     mode_key = "troubleshoot" if "故障" in mode else "qa"
-    result = query(question, mode=mode_key)
-    if result["has_result"]:
-        sources = "\n\n**📚 参考来源：**\n" + "\n".join(f"- {c}" for c in result["citations"])
-        bot_msg = result["answer"] + sources
-    else:
-        bot_msg = result["answer"]
     history = history or []
-    history.append({"role": "user", "content": question})
-    history.append({"role": "assistant", "content": bot_msg})
-    return history, ""
+
+    new_history = history + [
+        {"role": "user", "content": question},
+        {"role": "assistant", "content": ""},
+    ]
+    yield new_history, ""
+
+    accumulated = ""
+    for delta, is_final, citations, has_result in query_stream(question, mode=mode_key, history=history):
+        if is_final:
+            if has_result and citations:
+                sources = "\n\n**📚 参考来源：**\n" + "\n".join(f"- {c}" for c in citations)
+                new_history[-1]["content"] = accumulated + sources
+            else:
+                # no result: delta contains the full fallback message
+                new_history[-1]["content"] = accumulated or delta
+        else:
+            accumulated += delta
+            new_history[-1]["content"] = accumulated
+        yield new_history, ""
 
 
 def get_db_status():
@@ -233,6 +245,7 @@ with gr.Blocks(title="Nikon Expert") as demo:
 
 if __name__ == "__main__":
     port = int(os.getenv("UI_PORT", "7860"))
+    demo.queue()
     demo.launch(
         server_name="0.0.0.0",
         server_port=port,

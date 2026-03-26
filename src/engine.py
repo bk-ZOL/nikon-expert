@@ -223,6 +223,97 @@ def engine_db_status() -> dict:
         return {"collection": _engine.get("collection", "—"), "points": 0, "status": str(e)}
 
 
+def query_stream(question: str, mode: str = "qa", history: list = None):
+    """
+    流式查询，逐 token yield。
+
+    Yields:
+        (delta: str, is_final: bool, citations: list, has_result: bool)
+        - 普通 chunk：(文本片段, False, [], True)
+        - 最终 chunk：("", True, 引用列表, True)
+        - 无结果：(NO_RESULT_RESPONSE, True, [], False)
+    """
+    from src.prompts import (
+        KNOWLEDGE_QA_PROMPT, TROUBLESHOOTING_PROMPT, NO_RESULT_RESPONSE
+    )
+    from llama_index.core import Settings
+
+    threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.30"))
+    rerank_top_n = int(os.getenv("RERANK_TOP_N", "4"))
+    eng = _init_engine()
+
+    # ── 1. 检索
+    nodes = eng["retriever"].retrieve(question)
+    nodes = [n for n in nodes if (n.score or 0.0) >= threshold]
+
+    if not nodes:
+        yield NO_RESULT_RESPONSE, True, [], False
+        return
+
+    # ── 2. 重排序
+    if eng["reranker"] is not None:
+        reranked = eng["reranker"].postprocess_nodes(nodes, query_str=question)
+    else:
+        reranked = nodes[:rerank_top_n] if len(nodes) > rerank_top_n else nodes
+
+    # ── 3. 构建带溯源的 Context
+    ctx_parts, citations = [], []
+    for i, n in enumerate(reranked, 1):
+        m = n.metadata
+        doc_name = m.get("doc_name", "未知文档")
+        doc_type = m.get("doc_type", "")
+        page     = m.get("page_start", "")
+        date     = m.get("fault_date", "")
+        score    = n.score or 0.0
+
+        if doc_type == "manual" and page:
+            cite = f"《{doc_name}》第 {page} 页"
+        elif doc_type == "fault_history" and date:
+            codes = m.get("error_codes", [])
+            code_str = f"[{', '.join(codes)}] " if codes else ""
+            cite = f"故障履历 {code_str}{date} — {doc_name}"
+        elif doc_type == "checksheet":
+            row = m.get("row_index", "")
+            cite = f"《{doc_name}》第 {row} 行"
+        else:
+            file_path = m.get("file_path", "")
+            cite = f"{doc_name}" + (f"（{Path(file_path).parent.name}）" if file_path else "")
+
+        ctx_parts.append(
+            f"[参考资料 {i}] 来源：{cite}\n置信度：{score:.3f}\n"
+            f"内容：\n{n.get_content()}\n" + "─" * 50
+        )
+        citations.append(f"[{i}] {cite}  (置信度 {score:.3f})")
+
+    context = "\n\n".join(ctx_parts)
+
+    # ── 4. 多轮对话历史（最近 6 条消息 = 3 轮）
+    history_prefix = ""
+    if history:
+        recent = history[-6:]
+        turns = []
+        for msg in recent:
+            role = "工程师" if msg["role"] == "user" else "助手"
+            content = msg["content"][:400]
+            turns.append(f"{role}：{content}")
+        history_prefix = "【对话历史（最近几轮）】\n" + "\n".join(turns) + "\n\n"
+
+    query_with_history = history_prefix + question
+
+    # ── 5. 选择 Prompt
+    prompt_tmpl = (
+        TROUBLESHOOTING_PROMPT if mode == "troubleshoot"
+        else KNOWLEDGE_QA_PROMPT
+    )
+    final_prompt = prompt_tmpl.format(context=context, query=query_with_history)
+
+    # ── 6. 流式调用 LLM
+    for token in Settings.llm.stream_complete(final_prompt):
+        yield token.delta, False, [], True
+
+    yield "", True, citations, True
+
+
 def query(question: str, mode: str = "qa") -> dict:
     """
     执行一次完整查询。
