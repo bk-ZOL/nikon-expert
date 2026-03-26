@@ -49,17 +49,37 @@ def get_db_status():
     return f"⚠️ 知识库异常：{s['status']}"
 
 
-def get_ollama_models():
+LOCAL_URL  = "http://localhost:11434"
+REMOTE_URL = os.getenv("REMOTE_OLLAMA_URL", "http://192.168.168.208:11434")
+
+
+def get_ollama_models(base_url: str = LOCAL_URL):
     try:
-        r = _requests.get("http://localhost:11434/api/tags", timeout=3)
+        r = _requests.get(f"{base_url}/api/tags", timeout=3)
         return [m["name"] for m in r.json().get("models", [])]
     except Exception:
         return []
 
 
-def do_switch_model(model_name: str):
+def do_switch_server(server_label: str):
+    """切换 Ollama 服务器（本地 / 内网）"""
+    url = REMOTE_URL if "内网" in server_label else LOCAL_URL
+    models = get_ollama_models(url)
+    if not models:
+        return f"⚠️ 无法连接到 {url}，请检查网络", gr.update()
+    # 更新引擎的 LLM base_url
+    import os as _os
+    _os.environ["LLM_BASE_URL"] = url
+    switch_llm(models[0])  # 切换到该服务器第一个可用模型
+    return f"✅ 已切换到 **{server_label}**（{url}）", gr.update(choices=models, value=models[0])
+
+
+def do_switch_model(model_name: str, server_label: str):
     if not model_name:
         return "⚠️ 请选择模型"
+    url = REMOTE_URL if "内网" in server_label else LOCAL_URL
+    import os as _os
+    _os.environ["LLM_BASE_URL"] = url
     switch_llm(model_name)
     return f"✅ 已切换至 **{model_name}**"
 
@@ -124,6 +144,11 @@ with gr.Blocks(title="Nikon Expert") as demo:
 **🔧 故障排查**：输入 Error Code 或故障现象
                     """)
                     gr.Markdown("---")
+                    server_radio = gr.Radio(
+                        choices=["💻 本地 Ollama", "🏢 公司内网 Ollama"],
+                        value="💻 本地 Ollama",
+                        label="服务器",
+                    )
                     model_dropdown = gr.Dropdown(
                         choices=get_ollama_models(),
                         value=get_current_model(),
@@ -199,7 +224,8 @@ with gr.Blocks(title="Nikon Expert") as demo:
     question.submit(chat, inputs=[question, mode, chatbot], outputs=[chatbot, question])
     clear_btn.click(lambda: ([], ""), outputs=[chatbot, question])  # type: ignore
     refresh_btn.click(get_db_status, outputs=[status_text])
-    switch_btn.click(do_switch_model, inputs=[model_dropdown], outputs=[switch_status])
+    server_radio.change(do_switch_server, inputs=[server_radio], outputs=[switch_status, model_dropdown])
+    switch_btn.click(do_switch_model, inputs=[model_dropdown, server_radio], outputs=[switch_status])
     ingest_btn.click(do_ingest_file, inputs=[upload_file], outputs=[ingest_status])
     refresh_kb_btn.click(do_get_kb_docs, outputs=[kb_table])
     del_btn.click(do_delete_selected, inputs=[kb_table], outputs=[del_status, kb_table])
