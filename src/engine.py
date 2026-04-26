@@ -1,6 +1,6 @@
 # src/engine.py
-# Nikon Expert — 核心引擎（检索 + 重排序 + LLM 问答）
-# 单文件封装，供 scripts/ 和 ui/ 直接调用
+# Nikon Expert — 核心引擎（FTS + 语义检索 + 路由融合 + LLM 问答）
+# Karpathy (FTS/grep) + Gbrain (结构分块/元数据) + RAG (检索增强生成)
 
 import os
 from pathlib import Path
@@ -9,12 +9,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── 延迟导入，避免启动时间过长 ──────────────────────────────
-_engine = None  # 全局单例
+_engine = None
 
 
 def _init_engine():
-    """初始化引擎（首次调用时执行，后续复用）"""
+    """初始化引擎：Embedding + LLM + Qdrant + FTS"""
     global _engine
     if _engine is not None:
         return _engine
@@ -25,10 +24,12 @@ def _init_engine():
     from llama_index.llms.ollama import Ollama
     from llama_index.vector_stores.qdrant import QdrantVectorStore
     from qdrant_client import QdrantClient
+    from src.fulltext import init_fts
 
     embed_path    = os.getenv("EMBED_MODEL_PATH", "./models/bge-m3")
     reranker_path = os.getenv("RERANKER_MODEL_PATH", "./models/bge-reranker-v2-m3")
     qdrant_path   = os.getenv("QDRANT_PATH", "./data/qdrant_db")
+    fts_path      = os.getenv("FTS_DB_PATH", "./data/fts.db")
     collection    = os.getenv("COLLECTION_NAME", "nikon_expert_v1")
     llm_model     = os.getenv("LLM_MODEL", "qwen2.5:14b-instruct-q6_K")
     llm_url       = os.getenv("LLM_BASE_URL", "http://localhost:11434")
@@ -58,7 +59,6 @@ def _init_engine():
 
     retriever = VectorIndexRetriever(index=index, similarity_top_k=top_k)
 
-    # 重排序：优先用 FlagEmbedding，否则降级用 SentenceTransformer，失败则跳过
     reranker = None
     try:
         from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
@@ -72,13 +72,27 @@ def _init_engine():
         except Exception as e:
             print(f"⚠️  重排序不可用，跳过：{e}")
 
-    _engine = {"retriever": retriever, "reranker": reranker, "client": client, "collection": collection}
-    print("✅ 引擎初始化完成")
+    # 初始化 FTS 层 (Karpathy)
+    init_fts(fts_path)
+    fts_status = None
+    try:
+        from src.fulltext import fts_status as _fts_st
+        fts_status = _fts_st()
+    except Exception:
+        pass
+    print(f"⚙️  FTS 全文搜索：{fts_status}")
+
+    _engine = {
+        "retriever": retriever,
+        "reranker": reranker,
+        "client": client,
+        "collection": collection,
+    }
+    print("✅ 引擎初始化完成（FTS + 语义双层）")
     return _engine
 
 
 def get_current_model() -> str:
-    """返回当前激活的 LLM 模型名。"""
     from llama_index.core import Settings
     if Settings.llm is None:
         return os.getenv("LLM_MODEL", "unknown")
@@ -86,7 +100,6 @@ def get_current_model() -> str:
 
 
 def switch_llm(model_name: str) -> None:
-    """热替换 LLM，不重新加载 Embedding / Retriever / Qdrant。"""
     from llama_index.core import Settings
     from llama_index.llms.ollama import Ollama
     Settings.llm = Ollama(
@@ -98,109 +111,184 @@ def switch_llm(model_name: str) -> None:
 
 
 def ingest_file(file_path: str) -> dict:
-    """摄入单个上传文件（PDF / MD）到知识库，复用 engine 已有 client。"""
+    """摄入单个上传文件（PDF / MD），使用新分块策略"""
     import gc
-    from pathlib import Path
+    import hashlib
     from llama_index.core import VectorStoreIndex, Document, StorageContext
-    from llama_index.core.node_parser import SentenceSplitter
     from llama_index.vector_stores.qdrant import QdrantVectorStore
 
     eng = _init_engine()
     path = Path(file_path)
     suffix = path.suffix.lower()
-    docs = []
+    rid = hashlib.sha256(str(path).encode()).hexdigest()[:12]
+    doc_name = path.name
 
-    if suffix == ".pdf":
-        import pymupdf4llm
-        pages = pymupdf4llm.to_markdown(str(path), page_chunks=True)
-        for chunk in pages:
-            text = chunk.get("text", "").strip()
-            if not text:
-                continue
-            page = chunk.get("metadata", {}).get("page", 0) + 1
-            docs.append(Document(
-                text=text,
-                metadata={
-                    "doc_name": path.name, "doc_type": "manual",
-                    "language": "en", "page_start": page, "page_end": page,
-                    "machine_model": "", "chunk_type": "body",
-                },
-            ))
-        del pages
-    elif suffix == ".md":
-        text = path.read_text(encoding="utf-8").strip()
-        if text:
-            docs.append(Document(
-                text=text,
-                metadata={
-                    "doc_name": path.name, "doc_type": "obsidian_note",
-                    "language": "zh", "file_path": str(path),
-                },
-            ))
+    # 去重：先删除旧数据
+    from qdrant_client.models import Filter, FieldCondition, MatchValue, FilterSelector
+    eng["client"].delete(
+        collection_name=eng["collection"],
+        points_selector=FilterSelector(
+            filter=Filter(must=[FieldCondition(key="doc_name", match=MatchValue(value=doc_name))])
+        ),
+    )
+    try:
+        from src.fulltext import delete_doc_fts_by_name
+        delete_doc_fts_by_name(doc_name)
+    except Exception:
+        pass
+
+    if suffix == ".md":
+        return _ingest_md_file(eng, path, rid, doc_name)
+    elif suffix == ".pdf":
+        return _ingest_pdf_file(eng, path, rid, doc_name)
     else:
         return {"success": False, "message": f"不支持的格式：{suffix}，仅支持 PDF / MD"}
 
+
+def _ingest_md_file(eng, path: Path, rid: str, doc_name: str) -> dict:
+    import hashlib
+    from llama_index.core import VectorStoreIndex, Document, StorageContext
+    from llama_index.core.node_parser import SentenceSplitter
+    from llama_index.vector_stores.qdrant import QdrantVectorStore
+    from src.ingestor import _split_by_headings, _chunk_hash
+
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        return {"success": False, "message": "文件为空"}
+
+    sections = _split_by_headings(text, max_chunk=1024)
+    docs = []
+    for sec_title, sec_text in sections:
+        if not sec_text.strip():
+            continue
+        docs.append(Document(
+            text=sec_text,
+            metadata={
+                "doc_name": doc_name, "doc_type": "obsidian_note",
+                "language": "zh", "file_path": str(path),
+                "doc_id": rid, "chunk_hash": _chunk_hash(sec_text),
+                "section_title": sec_title,
+            },
+        ))
+        try:
+            from src.fulltext import ingest_fts
+            ingest_fts(rid, doc_name, "obsidian_note", "", sec_title, sec_text, str(path))
+        except Exception:
+            pass
+
     if not docs:
-        return {"success": False, "message": "未能提取到文本，可能是纯图片 PDF"}
+        return {"success": False, "message": "未能提取到有效内容"}
 
     splitter = SentenceSplitter(chunk_size=512, chunk_overlap=64)
     nodes = splitter.get_nodes_from_documents(docs, show_progress=False)
-    del docs
 
     vs = QdrantVectorStore(client=eng["client"], collection_name=eng["collection"])
     ctx = StorageContext.from_defaults(vector_store=vs)
     VectorStoreIndex(nodes, storage_context=ctx, show_progress=False)
-    n = len(nodes)
-    del nodes
-    gc.collect()
-    return {"success": True, "message": f"✅ 摄入完成：**{path.name}**（{n} chunks）", "chunks": n}
+    return {"success": True, "message": f"✅ 摄入完成：**{doc_name}**（{len(nodes)} chunks）", "chunks": len(nodes)}
+
+
+def _ingest_pdf_file(eng, path: Path, rid: str, doc_name: str) -> dict:
+    import hashlib
+    import pymupdf4llm
+    from llama_index.core import VectorStoreIndex, Document, StorageContext
+    from llama_index.core.node_parser import SentenceSplitter
+    from llama_index.vector_stores.qdrant import QdrantVectorStore
+    from src.ingestor import _split_by_headings, _chunk_hash
+
+    pages = pymupdf4llm.to_markdown(str(path), page_chunks=True)
+    full_text = ""
+    page_map = {}
+    for chunk in pages:
+        text = chunk.get("text", "").strip()
+        if not text:
+            continue
+        page = chunk.get("metadata", {}).get("page", 0) + 1
+        page_map[page] = len(full_text)
+        full_text += text + "\n\n"
+
+    if not full_text.strip():
+        return {"success": False, "message": "未能提取到文本，可能是纯图片 PDF"}
+
+    def _guess_page(char_pos: int) -> int:
+        best = 1
+        for pg, pos in sorted(page_map.items()):
+            if pos <= char_pos:
+                best = pg
+        return best
+
+    sections = _split_by_headings(full_text, max_chunk=1024)
+    child_splitter = SentenceSplitter(chunk_size=256, chunk_overlap=32)
+    all_nodes = []
+
+    for sec_title, sec_text in sections:
+        if len(sec_text.strip()) < 20:
+            continue
+        page = _guess_page(full_text.find(sec_text[:50]))
+        pid = _chunk_hash(sec_text)
+        parent = Document(
+            text=sec_text,
+            metadata={
+                "doc_name": doc_name, "doc_type": "manual",
+                "language": "en", "page_start": page,
+                "machine_model": "", "chunk_type": "parent",
+                "doc_id": rid, "chunk_hash": pid,
+                "section_title": sec_title,
+            },
+        )
+        all_nodes.append(parent)
+        if len(sec_text) > 256:
+            children = child_splitter.get_nodes_from_documents([parent], show_progress=False)
+            for c in children:
+                c.metadata["chunk_type"] = "child"
+                c.metadata["parent_hash"] = pid
+            all_nodes.extend(children)
+        try:
+            from src.fulltext import ingest_fts
+            ingest_fts(rid, doc_name, "manual", "", sec_title, sec_text)
+        except Exception:
+            pass
+
+    vs = QdrantVectorStore(client=eng["client"], collection_name=eng["collection"])
+    ctx = StorageContext.from_defaults(vector_store=vs)
+    VectorStoreIndex(all_nodes, storage_context=ctx, show_progress=False)
+    return {"success": True, "message": f"✅ 摄入完成：**{doc_name}**（{len(all_nodes)} chunks）", "chunks": len(all_nodes)}
 
 
 def get_kb_documents() -> list:
-    """返回知识库中所有文档的统计列表（含文件路径）。"""
     from collections import Counter
     eng = _init_engine()
     doc_counts, doc_meta = Counter(), {}
     offset = None
     while True:
-        points, next_offset = eng["client"].scroll(
-            collection_name=eng["collection"],
-            limit=500, offset=offset,
-            with_payload=True, with_vectors=False,
-        )
+        try:
+            points, next_offset = eng["client"].scroll(
+                collection_name=eng["collection"],
+                limit=500, offset=offset,
+                with_payload=True, with_vectors=False,
+            )
+        except (ValueError, Exception):
+            return []
         if not points:
             break
         for p in points:
             name = p.payload.get("doc_name", "未知")
             doc_counts[name] += 1
             if name not in doc_meta:
-                file_path    = p.payload.get("file_path", "")
-                machine_model = p.payload.get("machine_model", "")
-                doc_type     = p.payload.get("doc_type", "")
-                # 优先用存储的 file_path；PDF 用 machine_model 作目录提示
-                if file_path:
-                    location = file_path
-                elif machine_model:
-                    location = machine_model
-                else:
-                    location = "—"
-                doc_meta[name] = {"doc_type": doc_type, "location": location}
+                fp = p.payload.get("file_path", "")
+                mm = p.payload.get("machine_model", "")
+                dt = p.payload.get("doc_type", "")
+                doc_meta[name] = {"doc_type": dt, "location": fp or mm or "—"}
         offset = next_offset
         if next_offset is None:
             break
     return [
-        {
-            "文档名": n,
-            "类型": doc_meta[n]["doc_type"],
-            "位置": doc_meta[n]["location"],
-            "Chunks": c,
-        }
+        {"文档名": n, "类型": doc_meta[n]["doc_type"], "位置": doc_meta[n]["location"], "Chunks": c}
         for n, c in sorted(doc_counts.items())
     ]
 
 
 def delete_document(doc_name: str) -> str:
-    """删除知识库中指定文档的全部向量。"""
     from qdrant_client.models import Filter, FieldCondition, MatchValue, FilterSelector
     eng = _init_engine()
     eng["client"].delete(
@@ -209,105 +297,161 @@ def delete_document(doc_name: str) -> str:
             filter=Filter(must=[FieldCondition(key="doc_name", match=MatchValue(value=doc_name))])
         ),
     )
+    try:
+        from src.fulltext import delete_doc_fts_by_name
+        delete_doc_fts_by_name(doc_name)
+    except Exception:
+        pass
     return f"✅ 已删除：**{doc_name}**"
 
 
 def engine_db_status() -> dict:
-    """通过引擎已有的 client 查询库状态（避免重复开锁）"""
     if _engine is None:
         return {"collection": "—", "points": 0, "status": "engine not initialized"}
     try:
         info = _engine["client"].get_collection(_engine["collection"])
-        return {"collection": _engine["collection"], "points": info.points_count, "status": "ok"}
-    except Exception as e:
-        return {"collection": _engine.get("collection", "—"), "points": 0, "status": str(e)}
+        qdrant_pts = info.points_count
+    except (ValueError, Exception):
+        qdrant_pts = 0
+
+    fts_info = {"records": 0, "documents": 0}
+    try:
+        from src.fulltext import fts_status
+        fts_info = fts_status()
+    except Exception:
+        pass
+
+    return {
+        "collection": _engine.get("collection", "—"),
+        "points": qdrant_pts,
+        "fts_records": fts_info.get("records", 0),
+        "fts_documents": fts_info.get("documents", 0),
+        "status": "ok",
+    }
 
 
-def query_stream(question: str, mode: str = "qa", history: list = None):
+# ── 路由融合检索（核心）──────────────────────────────────────
+
+def _retrieve_with_router(question: str, mode: str = "qa") -> list:
     """
-    流式查询，逐 token yield。
-
-    Yields:
-        (delta: str, is_final: bool, citations: list, has_result: bool)
-        - 普通 chunk：(文本片段, False, [], True)
-        - 最终 chunk：("", True, 引用列表, True)
-        - 无结果：(NO_RESULT_RESPONSE, True, [], False)
+    智能路由检索：分类查询 → FTS + 语义双路召回 → 融合排序
+    返回: [{"doc_name", "doc_type", "text", "score", "source", ...}, ...]
     """
-    from src.prompts import (
-        KNOWLEDGE_QA_PROMPT, TROUBLESHOOTING_PROMPT, NO_RESULT_RESPONSE
-    )
-    from llama_index.core import Settings
+    from src.router import classify_query, get_route_weights, merge_results, extract_machine_models
+    from src.fulltext import search_fts, search_fts_exact
 
     threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.30"))
+    top_k = int(os.getenv("RETRIEVAL_TOP_K", "8"))
     rerank_top_n = int(os.getenv("RERANK_TOP_N", "4"))
     eng = _init_engine()
 
-    # ── 1. 检索
-    nodes = eng["retriever"].retrieve(question)
-    nodes = [n for n in nodes if (n.score or 0.0) >= threshold]
+    # ── 1. 查询分类
+    qtype = classify_query(question)
+    fts_w, sem_w = get_route_weights(qtype)
 
-    if not nodes:
-        yield NO_RESULT_RESPONSE, True, [], False
-        return
+    # ── 2. FTS 检索 (Karpathy 层)
+    fts_results = []
+    try:
+        fts_query = question
+        # 精确匹配 Error Code
+        from src.router import extract_error_codes
+        codes = extract_error_codes(question)
+        if codes:
+            fts_results = search_fts_exact(codes[0], limit=top_k)
+        else:
+            # 用主要关键词做 FTS 搜索
+            fts_query = question.replace("？", "").replace("?", "").strip()
+            if fts_query:
+                fts_results = search_fts(fts_query, limit=top_k)
+    except Exception:
+        pass
 
-    # ── 2. 重排序
-    if eng["reranker"] is not None:
-        reranked = eng["reranker"].postprocess_nodes(nodes, query_str=question)
-    else:
-        reranked = nodes[:rerank_top_n] if len(nodes) > rerank_top_n else nodes
+    # ── 3. 语义检索 (Gbrain 层)
+    semantic_results = []
+    try:
+        nodes = eng["retriever"].retrieve(question)
+        semantic_results = [n for n in nodes if (n.score or 0.0) >= threshold]
+    except (ValueError, Exception):
+        pass
 
-    # ── 3. 构建带溯源的 Context
+    # ── 4. 融合
+    merged = merge_results(fts_results, semantic_results, fts_w, sem_w, top_n=top_k)
+
+    return merged, qtype
+
+
+def _build_context(merged_results: list, mode: str = "qa") -> tuple:
+    """从融合结果构建 LLM context 和 citations"""
+    from src.prompts import NO_RESULT_RESPONSE
+
+    if not merged_results:
+        return "", [], False
+
     ctx_parts, citations = [], []
-    for i, n in enumerate(reranked, 1):
-        m = n.metadata
-        doc_name = m.get("doc_name", "未知文档")
-        doc_type = m.get("doc_type", "")
-        page     = m.get("page_start", "")
-        date     = m.get("fault_date", "")
-        score    = n.score or 0.0
+    for i, r in enumerate(merged_results, 1):
+        doc_name = r.get("doc_name", "未知文档")
+        doc_type = r.get("doc_type", "")
+        page     = r.get("page_start", "")
+        date     = r.get("fault_date", "")
+        section  = r.get("section_title", "")
+        score    = r.get("score", 0)
+        source   = r.get("source", "semantic")
+        text     = r.get("text", "")
 
+        # 引用格式
         if doc_type == "manual" and page:
             cite = f"《{doc_name}》第 {page} 页"
+        elif doc_type == "manual" and section:
+            cite = f"《{doc_name}》— {section}"
         elif doc_type == "fault_history" and date:
-            codes = m.get("error_codes", [])
+            codes = r.get("error_codes", [])
             code_str = f"[{', '.join(codes)}] " if codes else ""
             cite = f"故障履历 {code_str}{date} — {doc_name}"
         elif doc_type == "checksheet":
-            row = m.get("row_index", "")
+            row = r.get("row_index", "")
             cite = f"《{doc_name}》第 {row} 行"
         else:
-            file_path = m.get("file_path", "")
-            cite = f"{doc_name}" + (f"（{Path(file_path).parent.name}）" if file_path else "")
+            fp = r.get("file_path", "")
+            cite = f"{doc_name}" + (f"（{Path(fp).parent.name}）" if fp else "")
+
+        # 来源标注
+        source_label = {"fts": "关键词", "semantic": "语义", "fts+semantic": "双引擎"}.get(source, source)
 
         ctx_parts.append(
-            f"[参考资料 {i}] 来源：{cite}\n置信度：{score:.3f}\n"
-            f"内容：\n{n.get_content()}\n" + "─" * 50
+            f"[参考资料 {i}] 来源：{cite}\n检索方式：{source_label}\n"
+            f"内容：\n{text}\n" + "─" * 50
         )
-        citations.append(f"[{i}] {cite}  (置信度 {score:.3f})")
+        citations.append(f"[{i}] {cite}  ({source_label})")
 
     context = "\n\n".join(ctx_parts)
+    return context, citations, True
 
-    # ── 4. 多轮对话历史（最近 6 条消息 = 3 轮）
+
+def query_stream(question: str, mode: str = "qa", history: list = None):
+    """流式查询，使用路由融合检索"""
+    from src.prompts import KNOWLEDGE_QA_PROMPT, TROUBLESHOOTING_PROMPT, NO_RESULT_RESPONSE
+    from llama_index.core import Settings
+
+    merged, qtype = _retrieve_with_router(question, mode)
+    context, citations, has_result = _build_context(merged, mode)
+
+    if not has_result:
+        yield NO_RESULT_RESPONSE, True, [], False
+        return
+
+    # 多轮对话历史
     history_prefix = ""
     if history:
         recent = history[-6:]
         turns = []
         for msg in recent:
             role = "工程师" if msg["role"] == "user" else "助手"
-            content = msg["content"][:400]
-            turns.append(f"{role}：{content}")
+            turns.append(f"{role}：{msg['content'][:400]}")
         history_prefix = "【对话历史（最近几轮）】\n" + "\n".join(turns) + "\n\n"
 
-    query_with_history = history_prefix + question
+    prompt_tmpl = TROUBLESHOOTING_PROMPT if mode == "troubleshoot" else KNOWLEDGE_QA_PROMPT
+    final_prompt = prompt_tmpl.format(context=context, query=history_prefix + question)
 
-    # ── 5. 选择 Prompt
-    prompt_tmpl = (
-        TROUBLESHOOTING_PROMPT if mode == "troubleshoot"
-        else KNOWLEDGE_QA_PROMPT
-    )
-    final_prompt = prompt_tmpl.format(context=context, query=query_with_history)
-
-    # ── 6. 流式调用 LLM
     for token in Settings.llm.stream_complete(final_prompt):
         yield token.delta, False, [], True
 
@@ -315,92 +459,24 @@ def query_stream(question: str, mode: str = "qa", history: list = None):
 
 
 def query(question: str, mode: str = "qa") -> dict:
-    """
-    执行一次完整查询。
-
-    Args:
-        question: 工程师输入的问题或故障描述
-        mode: "qa"（知识问答）或 "troubleshoot"（故障排查）
-
-    Returns:
-        {
-            "answer": str,          # LLM 回答
-            "citations": list[str], # 引用列表
-            "retrieved": int,       # 检索到的文档数
-            "has_result": bool,     # 是否找到相关内容
-        }
-    """
-    from src.prompts import (
-        KNOWLEDGE_QA_PROMPT, TROUBLESHOOTING_PROMPT, NO_RESULT_RESPONSE
-    )
+    """执行一次完整查询（非流式）"""
+    from src.prompts import KNOWLEDGE_QA_PROMPT, TROUBLESHOOTING_PROMPT, NO_RESULT_RESPONSE
     from llama_index.core import Settings
 
-    threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.30"))
-    rerank_top_n = int(os.getenv("RERANK_TOP_N", "4"))
-    eng = _init_engine()
+    merged, qtype = _retrieve_with_router(question, mode)
+    context, citations, has_result = _build_context(merged, mode)
 
-    # ── 1. 检索 ──────────────────────────────────────────────
-    nodes = eng["retriever"].retrieve(question)
-    nodes = [n for n in nodes if (n.score or 0.0) >= threshold]
+    if not has_result:
+        return {"answer": NO_RESULT_RESPONSE, "citations": [], "retrieved": 0, "has_result": False}
 
-    if not nodes:
-        return {
-            "answer": NO_RESULT_RESPONSE,
-            "citations": [],
-            "retrieved": 0,
-            "has_result": False,
-        }
-
-    # ── 2. 重排序 ─────────────────────────────────────────────
-    if eng["reranker"] is not None:
-        reranked = eng["reranker"].postprocess_nodes(nodes, query_str=question)
-    else:
-        reranked = nodes[:rerank_top_n] if len(nodes) > rerank_top_n else nodes
-
-    # ── 3. 构建带溯源的 Context ──────────────────────────────
-    ctx_parts, citations = [], []
-    for i, n in enumerate(reranked, 1):
-        m = n.metadata
-        doc_name = m.get("doc_name", "未知文档")
-        doc_type = m.get("doc_type", "")
-        page     = m.get("page_start", "")
-        date     = m.get("fault_date", "")
-        score    = n.score or 0.0
-
-        if doc_type == "manual" and page:
-            cite = f"《{doc_name}》第 {page} 页"
-        elif doc_type == "fault_history" and date:
-            codes = m.get("error_codes", [])
-            code_str = f"[{', '.join(codes)}] " if codes else ""
-            cite = f"故障履历 {code_str}{date} — {doc_name}"
-        elif doc_type == "checksheet":
-            row = m.get("row_index", "")
-            cite = f"《{doc_name}》第 {row} 行"
-        else:
-            file_path = m.get("file_path", "")
-            cite = f"{doc_name}" + (f"（{Path(file_path).parent.name}）" if file_path else "")
-
-        ctx_parts.append(
-            f"[参考资料 {i}] 来源：{cite}\n置信度：{score:.3f}\n"
-            f"内容：\n{n.get_content()}\n" + "─" * 50
-        )
-        citations.append(f"[{i}] {cite}  (置信度 {score:.3f})")
-
-    context = "\n\n".join(ctx_parts)
-
-    # ── 4. 选择 Prompt ────────────────────────────────────────
-    prompt_tmpl = (
-        TROUBLESHOOTING_PROMPT if mode == "troubleshoot"
-        else KNOWLEDGE_QA_PROMPT
-    )
+    prompt_tmpl = TROUBLESHOOTING_PROMPT if mode == "troubleshoot" else KNOWLEDGE_QA_PROMPT
     final_prompt = prompt_tmpl.format(context=context, query=question)
-
-    # ── 5. 调用 LLM ───────────────────────────────────────────
     response = Settings.llm.complete(final_prompt)
 
     return {
         "answer": str(response),
         "citations": citations,
-        "retrieved": len(reranked),
+        "retrieved": len(merged),
         "has_result": True,
+        "query_type": qtype,
     }
