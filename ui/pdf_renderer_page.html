@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #525659; overflow: auto; }
+  #canvas-container { display: flex; flex-direction: column; align-items: center; padding: 16px; min-height: 100vh; }
+  canvas { display: block; box-shadow: 0 2px 10px rgba(0,0,0,0.4); margin: 4px 0; }
+  #loading { color: #ccc; font: 14px sans-serif; text-align: center; padding: 60px; }
+  #error { color: #f88; font: 14px sans-serif; text-align: center; padding: 60px; display: none; }
+</style>
+</head>
+<body>
+<div id="canvas-container">
+  <div id="loading">加载中...</div>
+  <div id="error"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+const urlParams = new URLSearchParams(window.location.search);
+const filePath = urlParams.get('file');
+let startPage = parseInt(urlParams.get('page')) || 1;
+let pdfDoc = null;
+let currentPage = startPage;
+let scale = 1.5;
+let rendering = false;
+
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+function setContainer(html) {
+  document.getElementById('canvas-container').innerHTML = html;
+}
+
+async function renderPage(pageNum) {
+  if (!pdfDoc || rendering) return;
+  rendering = true;
+  try {
+    const page = await pdfDoc.getPage(pageNum);
+    const viewport = page.getViewport({ scale });
+    const container = document.getElementById('canvas-container');
+    // Remove loading/error, add canvas
+    container.querySelectorAll('#loading,#error').forEach(e => e.remove());
+    let canvas = document.getElementById('pdf-canvas');
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      canvas.id = 'pdf-canvas';
+      container.prepend(canvas);
+    }
+    const ctx = canvas.getContext('2d');
+    canvas.height = viewport.height;
+    canvas.width = viewport.width;
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    currentPage = pageNum;
+    window.parent.postMessage({ type: 'PAGE_CHANGED', page: pageNum }, '*');
+  } catch (e) {
+    console.error('Render error:', e);
+  }
+  rendering = false;
+}
+
+async function init() {
+  if (!filePath) {
+    setContainer('<div id="error">未指定文件</div>');
+    return;
+  }
+  const pdfUrl = '/serve-pdf?path=' + encodeURIComponent(filePath);
+  try {
+    const loadingTask = pdfjsLib.getDocument(pdfUrl);
+    pdfDoc = await loadingTask.promise;
+    document.querySelectorAll('#loading').forEach(e => e.remove());
+    window.parent.postMessage({ type: 'PDF_READY', pages: pdfDoc.numPages }, '*');
+    if (startPage < 1) startPage = 1;
+    if (startPage > pdfDoc.numPages) startPage = pdfDoc.numPages;
+    renderPage(startPage);
+  } catch (e) {
+    setContainer('<div id="error">无法加载 PDF：' + e.message + '</div>');
+  }
+}
+
+init();
+
+window.addEventListener('message', async (e) => {
+  if (!e.data || !e.data.type) return;
+  switch (e.data.type) {
+    case 'GO_TO_PAGE':
+      if (pdfDoc) renderPage(e.data.page);
+      break;
+    case 'ZOOM_IN':
+      scale = Math.min(scale + 0.25, 4.0);
+      if (pdfDoc) renderPage(currentPage);
+      break;
+    case 'ZOOM_OUT':
+      scale = Math.max(scale - 0.25, 0.5);
+      if (pdfDoc) renderPage(currentPage);
+      break;
+    case 'ZOOM_FIT':
+      if (pdfDoc) {
+        const page = await pdfDoc.getPage(currentPage);
+        const containerWidth = document.getElementById('canvas-container').clientWidth - 32;
+        scale = containerWidth / page.getViewport({ scale: 1 }).width;
+        renderPage(currentPage);
+      }
+      break;
+    case 'GET_PAGES':
+      if (pdfDoc) {
+        window.parent.postMessage({ type: 'PDF_READY', pages: pdfDoc.numPages }, '*');
+      }
+      break;
+  }
+});
+</script>
+</body>
+</html>

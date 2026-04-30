@@ -35,8 +35,9 @@ def _get_storage():
     collection  = os.getenv("COLLECTION_NAME", "nikon_expert_v1")
 
     if Settings.embed_model is None:
+        from src.device import get_device
         Settings.embed_model = HuggingFaceEmbedding(
-            model_name=embed_path, max_length=512, device="mps"
+            model_name=embed_path, max_length=512, device=get_device()
         )
     Settings.llm = None
 

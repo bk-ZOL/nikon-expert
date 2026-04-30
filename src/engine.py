@@ -25,6 +25,7 @@ def _init_engine():
     from llama_index.vector_stores.qdrant import QdrantVectorStore
     from qdrant_client import QdrantClient
     from src.fulltext import init_fts
+    from src.device import get_device
 
     embed_path    = os.getenv("EMBED_MODEL_PATH", "./models/bge-m3")
     reranker_path = os.getenv("RERANKER_MODEL_PATH", "./models/bge-reranker-v2-m3")
@@ -40,7 +41,7 @@ def _init_engine():
     Settings.embed_model = HuggingFaceEmbedding(
         model_name=embed_path,
         max_length=512,
-        device="mps",
+        device=get_device(),
     )
 
     print(f"⚙️  连接 LLM：{llm_model} @ {llm_url}")
@@ -381,13 +382,13 @@ def _retrieve_with_router(question: str, mode: str = "qa") -> list:
 
 
 def _build_context(merged_results: list, mode: str = "qa") -> tuple:
-    """从融合结果构建 LLM context 和 citations"""
+    """从融合结果构建 LLM context、显示用 citations 和结构化 citations_data"""
     from src.prompts import NO_RESULT_RESPONSE
 
     if not merged_results:
-        return "", [], False
+        return "", [], [], False
 
-    ctx_parts, citations = [], []
+    ctx_parts, citations, citations_data = [], [], []
     for i, r in enumerate(merged_results, 1):
         doc_name = r.get("doc_name", "未知文档")
         doc_type = r.get("doc_type", "")
@@ -397,6 +398,7 @@ def _build_context(merged_results: list, mode: str = "qa") -> tuple:
         score    = r.get("score", 0)
         source   = r.get("source", "semantic")
         text     = r.get("text", "")
+        file_path = r.get("file_path", "")
 
         # 引用格式
         if doc_type == "manual" and page:
@@ -423,8 +425,20 @@ def _build_context(merged_results: list, mode: str = "qa") -> tuple:
         )
         citations.append(f"[{i}] {cite}  ({source_label})")
 
+        # 结构化数据供 UI 构建可点击引用按钮
+        citations_data.append({
+            "index": i,
+            "doc_name": doc_name,
+            "doc_type": doc_type,
+            "file_path": file_path,
+            "page": int(page) if page else None,
+            "section": section,
+            "source": source_label,
+            "cite_text": cite,
+        })
+
     context = "\n\n".join(ctx_parts)
-    return context, citations, True
+    return context, citations, citations_data, True
 
 
 def query_stream(question: str, mode: str = "qa", history: list = None):
@@ -433,10 +447,10 @@ def query_stream(question: str, mode: str = "qa", history: list = None):
     from llama_index.core import Settings
 
     merged, qtype = _retrieve_with_router(question, mode)
-    context, citations, has_result = _build_context(merged, mode)
+    context, citations, citations_data, has_result = _build_context(merged, mode)
 
     if not has_result:
-        yield NO_RESULT_RESPONSE, True, [], False
+        yield NO_RESULT_RESPONSE, True, [], [], False
         return
 
     # 多轮对话历史
@@ -453,9 +467,9 @@ def query_stream(question: str, mode: str = "qa", history: list = None):
     final_prompt = prompt_tmpl.format(context=context, query=history_prefix + question)
 
     for token in Settings.llm.stream_complete(final_prompt):
-        yield token.delta, False, [], True
+        yield token.delta, False, [], [], True
 
-    yield "", True, citations, True
+    yield "", True, citations, citations_data, True
 
 
 def query(question: str, mode: str = "qa") -> dict:
@@ -464,10 +478,10 @@ def query(question: str, mode: str = "qa") -> dict:
     from llama_index.core import Settings
 
     merged, qtype = _retrieve_with_router(question, mode)
-    context, citations, has_result = _build_context(merged, mode)
+    context, citations, citations_data, has_result = _build_context(merged, mode)
 
     if not has_result:
-        return {"answer": NO_RESULT_RESPONSE, "citations": [], "retrieved": 0, "has_result": False}
+        return {"answer": NO_RESULT_RESPONSE, "citations": [], "citations_data": [], "retrieved": 0, "has_result": False}
 
     prompt_tmpl = TROUBLESHOOTING_PROMPT if mode == "troubleshoot" else KNOWLEDGE_QA_PROMPT
     final_prompt = prompt_tmpl.format(context=context, query=question)
@@ -476,6 +490,7 @@ def query(question: str, mode: str = "qa") -> dict:
     return {
         "answer": str(response),
         "citations": citations,
+        "citations_data": citations_data,
         "retrieved": len(merged),
         "has_result": True,
         "query_type": qtype,
