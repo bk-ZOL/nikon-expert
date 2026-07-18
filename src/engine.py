@@ -111,6 +111,44 @@ def switch_llm(model_name: str) -> None:
     print(f"✅ LLM 已切换至：{model_name}")
 
 
+# 记录当前 provider/model，供 UI 显示
+_current_provider = os.getenv("LLM_PROVIDER", "ollama_local")
+
+
+def get_current_provider() -> str:
+    return _current_provider
+
+
+def switch_provider(provider_id: str, model_name: str) -> str:
+    """切换外接大脑：设置 Settings.llm 为指定 provider 的模型。
+    RAG 与 Agent 两条路径都用 Settings.llm，故一次切换全局生效。
+    返回给 UI 的状态文案；缺 key 等错误以 ValueError 抛出由调用方兜底。"""
+    global _current_provider
+    from llama_index.core import Settings
+    from src.providers import build_llm, get_provider
+
+    llm = build_llm(provider_id, model_name)   # 缺 key 会在此抛 ValueError
+    Settings.llm = llm
+    _current_provider = provider_id
+    label = get_provider(provider_id)["label"]
+    print(f"✅ LLM 已切换至：{label} / {model_name}")
+    return f"{label} · {model_name}"
+
+
+def ingest_okf(path: str) -> dict:
+    """导入 OKF（Open Knowledge Format）目录或单个 .md，复用当前引擎的 Qdrant 连接。
+    返回 {chunks, message}。"""
+    from llama_index.core import StorageContext
+    from llama_index.vector_stores.qdrant import QdrantVectorStore
+    from src.ingestor import ingest_okf as _ingest_okf
+
+    eng = _init_engine()
+    vs = QdrantVectorStore(client=eng["client"], collection_name=eng["collection"])
+    ctx = StorageContext.from_defaults(vector_store=vs)
+    n = _ingest_okf(path, storage=(vs, ctx, eng["client"]))
+    return {"chunks": n, "message": f"✅ OKF 导入完成：{n} 个 Chunk"}
+
+
 def ingest_file(file_path: str) -> dict:
     """摄入单个上传文件（PDF / MD），使用新分块策略"""
     import gc
@@ -441,10 +479,49 @@ def _build_context(merged_results: list, mode: str = "qa") -> tuple:
     return context, citations, citations_data, True
 
 
+def _agent_query_stream(question: str, history: list = None):
+    """把 ReAct agent 的事件流适配成 query_stream 的 5 元组契约。
+
+    yield (delta, is_final, citations, citations_data, has_result)
+    非 final：把「推理轨迹（工具调用/观察）+ 最终答案」作为 delta 累积显示；
+    final：给出去重后的引用。
+    """
+    from src.agent import run_agent_sync
+
+    yield "🔍 **多步排查中……**\n\n", False, [], [], True
+
+    final = None
+    for ev in run_agent_sync(question, history):
+        kind = ev["kind"]
+        if kind == "tool_call":
+            args = "，".join(f"{k}={v}" for k, v in ev["args"].items())
+            yield f"🔧 `{ev['tool']}`（{args}）\n", False, [], [], True
+        elif kind == "observation":
+            out = (ev["output"] or "").strip().replace("\n", " ")[:100]
+            yield f"　↳ {out}…\n", False, [], [], True
+        elif kind == "answer":
+            final = ev
+            yield "\n---\n\n" + ev["text"], False, [], [], True
+        elif kind == "error":
+            yield f"\n\n⚠️ Agent 执行出错：{ev['error']}", True, [], [], False
+            return
+
+    if final:
+        yield "", True, final["citations"], final["citations_data"], final["has_result"]
+    else:
+        yield "", True, [], [], False
+
+
 def query_stream(question: str, mode: str = "qa", history: list = None):
-    """流式查询，使用路由融合检索"""
+    """流式查询：智能路由决定走多步 Agent 还是单次 RAG 快路径。"""
     from src.prompts import KNOWLEDGE_QA_PROMPT, TROUBLESHOOTING_PROMPT, NO_RESULT_RESPONSE
+    from src.router import should_use_agent
     from llama_index.core import Settings
+
+    # ── 智能路由：故障排查 / 复合问题 → 多步 Agent
+    if should_use_agent(question, mode):
+        yield from _agent_query_stream(question, history)
+        return
 
     merged, qtype = _retrieve_with_router(question, mode)
     context, citations, citations_data, has_result = _build_context(merged, mode)

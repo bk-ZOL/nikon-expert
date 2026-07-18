@@ -83,12 +83,19 @@ def _build_citation_buttons(citations_data: list) -> str:
         if not cite_text:
             continue
         safe_text = _html.escape(cite_text)
-        if fp and fp.lower().endswith(".pdf"):
+        fp_low = fp.lower() if fp else ""
+        if fp and fp_low.endswith(".pdf"):
             pdf_url = f"/serve-pdf?path={_html.escape(_requests.utils.quote(fp, safe=''))}"
             if page:
                 pdf_url += f"#page={page}"
             items.append(
                 f'<a class="cite-link" href="{pdf_url}" target="_blank">'
+                f'{safe_text}</a>'
+            )
+        elif fp and fp_low.endswith((".md", ".markdown", ".txt")):
+            md_url = f"/serve-md?path={_html.escape(_requests.utils.quote(fp, safe=''))}"
+            items.append(
+                f'<a class="cite-link" href="{md_url}" target="_blank">'
                 f'{safe_text}</a>'
             )
         else:
@@ -116,29 +123,43 @@ def get_db_status():
 LOCAL_URL  = "http://localhost:11434"
 REMOTE_URL = os.getenv("REMOTE_OLLAMA_URL", "http://192.168.168.208:11434")
 
-
-def do_switch_server(server_label: str):
-    url = REMOTE_URL if "内网" in server_label else LOCAL_URL
-    models = backend.get_ollama_models(url)
-    if not models:
-        return f"⚠️ 无法连接到 {url}，请检查网络", gr.update()
-    if not models:
-        return f"⚠️ 无法连接到 {url}，请检查网络", gr.update()
-    import os as _os
-    _os.environ["LLM_BASE_URL"] = url
-    if models:
-        backend.switch_llm(models[0], url)
-    return f"✅ 已切换到 **{server_label}**（{url}）", gr.update(choices=models, value=models[0] if models else None)
+# provider 标签 ↔ id 映射（"外接大脑"下拉）
+from src.providers import list_providers as _list_providers, list_models as _list_models, provider_key as _provider_key
+_PROVIDER_CHOICES = [label for _id, label in _list_providers()]
+_LABEL2ID = {label: pid for pid, label in _list_providers()}
 
 
-def do_switch_model(model_name: str, server_label: str):
+def do_switch_provider(provider_label: str):
+    """切换 provider：刷新可选模型下拉。不立即切换 LLM，选好模型点按钮才切。"""
+    pid = _LABEL2ID.get(provider_label)
+    if not pid:
+        return gr.update(), "⚠️ 未知 provider"
+    models = _list_models(pid)
+    tip = ""
+    # key 缺失提醒
+    from src.providers import get_provider
+    prov = get_provider(pid)
+    if prov.get("needs_key") and not _provider_key(pid):
+        tip = f"⚠️ 该大脑需在 .env 设置 `{prov['key_env']}`"
+    elif prov.get("use_proxy"):
+        tip = "🌐 海外大脑，将走本地代理；数据会外传该 API"
+    elif prov["kind"] != "ollama":
+        tip = "☁️ 云端大脑：数据会外传该 API（embedding/检索仍本地）"
+    return gr.update(choices=models, value=models[0] if models else None), tip
+
+
+def do_apply_model(provider_label: str, model_name: str):
+    """真正切换 Settings.llm 到所选 provider + 模型。"""
+    pid = _LABEL2ID.get(provider_label)
+    if not pid:
+        return "⚠️ 请选择大脑"
     if not model_name:
-        return "⚠️ 请选择模型"
-    url = REMOTE_URL if "内网" in server_label else LOCAL_URL
-    import os as _os
-    _os.environ["LLM_BASE_URL"] = url
-    backend.switch_llm(model_name, url)
-    return f"✅ 已切换至 **{model_name}**"
+        return "⚠️ 请选择或填写模型名"
+    try:
+        desc = backend.switch_provider(pid, model_name)
+    except Exception as e:
+        return f"⚠️ 切换失败：{e}"
+    return f"✅ 已切换至 **{desc}**"
 
 
 def do_ingest_file(file_path):
@@ -200,6 +221,21 @@ def do_fts_index(dir_path: str, pattern: str):
         if errs:
             msg += f"\n⚠️ 错误 {len(errs)} 个：" + "；".join(errs[:3])
         return msg
+    return str(result)
+
+
+def do_okf_import(path: str):
+    if not path or not path.strip():
+        return "⚠️ 请填写 OKF 目录或 .md 文件路径"
+    path = path.strip()
+    if not os.path.exists(path):
+        return f"⚠️ 路径不存在：{path}"
+    try:
+        result = backend.ingest_okf(path)
+    except Exception as e:
+        return f"⚠️ 导入失败：{e}"
+    if isinstance(result, dict):
+        return result.get("message", f"✅ 导入完成：{result.get('chunks', 0)} 个 Chunk")
     return str(result)
 
 
@@ -291,19 +327,21 @@ with gr.Blocks(title="Nikon Expert") as demo:
             with gr.Accordion("⚙️ 设置", open=False):
                 with gr.Row():
                     with gr.Column(scale=1):
-                        server_radio = gr.Radio(
-                            choices=["💻 本地 Ollama", "🏢 公司内网 Ollama"],
-                            value="💻 本地 Ollama",
-                            label="服务器",
+                        provider_dropdown = gr.Dropdown(
+                            choices=_PROVIDER_CHOICES,
+                            value=_PROVIDER_CHOICES[0],
+                            label="🧠 大脑（provider）",
+                            interactive=True,
                         )
                         model_dropdown = gr.Dropdown(
                             choices=backend.get_ollama_models(),
                             value=backend.get_current_model(),
-                            label="🤖 LLM 模型",
+                            label="🤖 模型（可下拉选或手填）",
+                            allow_custom_value=True,
                             interactive=True,
                         )
                     with gr.Column(scale=1):
-                        switch_btn = gr.Button("切换模型", size="sm")
+                        switch_btn = gr.Button("切换大脑", size="sm")
                         switch_status = gr.Markdown("")
                         gr.Markdown("**示例问题：**")
                         gr.Markdown("""
@@ -325,6 +363,20 @@ with gr.Blocks(title="Nikon Expert") as demo:
                 )
                 ingest_btn = gr.Button("上传并向量化", variant="primary", scale=1)
                 ingest_status = gr.Markdown("")
+
+            gr.Markdown("---")
+
+            gr.Markdown("### 导入 OKF 知识库（Open Knowledge Format）")
+            gr.Markdown("_Google OKF 标准：每个概念一个 `.md`（YAML frontmatter + 正文）。"
+                        "填 OKF 目录或单个 `.md` 的完整路径，一键导入向量库 + 全文索引。_")
+            with gr.Row():
+                okf_dir_input = gr.Textbox(
+                    label="OKF 目录 / 文件路径",
+                    placeholder="/path/to/okf_bundle 或 /path/to/concept.md",
+                    scale=3,
+                )
+                okf_import_btn = gr.Button("📗 导入 OKF", variant="primary", scale=1)
+            okf_status_md = gr.Markdown("")
 
             gr.Markdown("---")
 
@@ -378,11 +430,12 @@ with gr.Blocks(title="Nikon Expert") as demo:
     question.submit(chat, inputs=[question, chatbot], outputs=[chatbot, question, citation_buttons])
     clear_btn.click(lambda: ([], "", ""), outputs=[chatbot, question, citation_buttons])
     refresh_btn.click(get_db_status, outputs=[status_text])
-    server_radio.change(do_switch_server, inputs=[server_radio], outputs=[switch_status, model_dropdown])
-    switch_btn.click(do_switch_model, inputs=[model_dropdown, server_radio], outputs=[switch_status])
+    provider_dropdown.change(do_switch_provider, inputs=[provider_dropdown], outputs=[model_dropdown, switch_status])
+    switch_btn.click(do_apply_model, inputs=[provider_dropdown, model_dropdown], outputs=[switch_status])
     ingest_btn.click(do_ingest_file, inputs=[upload_file], outputs=[ingest_status])
     refresh_kb_btn.click(do_get_kb_docs, outputs=[kb_table])
     del_btn.click(do_delete_selected, inputs=[kb_table], outputs=[del_status, kb_table])
+    okf_import_btn.click(do_okf_import, inputs=[okf_dir_input], outputs=[okf_status_md])
     fts_index_btn.click(do_fts_index, inputs=[fts_dir_input, fts_pattern], outputs=[fts_status_md])
     fts_clear_btn.click(do_fts_clear, outputs=[fts_status_md])
 
@@ -391,7 +444,7 @@ with gr.Blocks(title="Nikon Expert") as demo:
 import pathlib as _pl
 
 def _register_routes(fastapi_app):
-    from fastapi.responses import FileResponse, PlainTextResponse
+    from fastapi.responses import FileResponse, PlainTextResponse, HTMLResponse
 
     @fastapi_app.get("/serve-pdf")
     async def serve_pdf(path: str):
@@ -406,6 +459,66 @@ def _register_routes(fastapi_app):
         if resolved.suffix.lower() != ".pdf":
             return PlainTextResponse("Only PDF files allowed", status_code=400)
         return FileResponse(str(resolved), media_type="application/pdf")
+
+    @fastapi_app.get("/serve-md")
+    async def serve_md(path: str):
+        """渲染 OKF / Markdown 源文件：frontmatter 元数据卡片 + 正文 HTML。"""
+        try:
+            resolved = _pl.Path(path).resolve()
+        except Exception:
+            return PlainTextResponse("Invalid path", status_code=400)
+        if not resolved.exists() or not resolved.is_file():
+            return PlainTextResponse("File not found", status_code=404)
+        if resolved.suffix.lower() not in (".md", ".markdown", ".txt"):
+            return PlainTextResponse("Only markdown/text files allowed", status_code=400)
+
+        import markdown as _md
+        from src.ingestor import _parse_okf
+
+        raw = resolved.read_text(encoding="utf-8", errors="replace")
+        fm, body = _parse_okf(raw)
+        body_html = _md.markdown(body, extensions=["fenced_code", "tables", "sane_lists"])
+
+        # frontmatter → 元数据卡片
+        meta_rows = ""
+        label = {"type": "类型", "title": "标题", "description": "说明",
+                 "tags": "标签", "timestamp": "时间", "machine_model": "机型",
+                 "error_codes": "报警码", "resource": "来源"}
+        for k in ["type", "title", "machine_model", "error_codes", "tags", "timestamp", "description", "resource"]:
+            if k in fm and fm[k]:
+                v = fm[k]
+                if isinstance(v, (list, tuple)):
+                    v = "、".join(str(x) for x in v)
+                meta_rows += (f'<tr><td class="k">{label.get(k, k)}</td>'
+                              f'<td class="v">{_html.escape(str(v))}</td></tr>')
+        meta_card = f'<table class="meta">{meta_rows}</table>' if meta_rows else ""
+
+        page = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{_html.escape(str(fm.get('title') or resolved.stem))}</title>
+<style>
+  body {{ font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         max-width: 860px; margin: 0 auto; padding: 32px 24px; line-height: 1.7; color: #1a1a1a; }}
+  h1,h2,h3 {{ line-height: 1.3; }} h1 {{ font-size: 1.6rem; border-bottom: 2px solid #eee; padding-bottom: .3em; }}
+  .meta {{ border-collapse: collapse; margin: 0 0 24px; width: 100%; background: #f7f8fa;
+           border-radius: 8px; overflow: hidden; }}
+  .meta td {{ padding: 8px 14px; border-bottom: 1px solid #eaecef; font-size: .92rem; }}
+  .meta td.k {{ color: #666; white-space: nowrap; width: 88px; font-weight: 600; }}
+  .filepath {{ color: #999; font-size: .8rem; margin-bottom: 18px; word-break: break-all; }}
+  code {{ background: #f2f4f7; padding: 2px 5px; border-radius: 4px; }}
+  pre {{ background: #f7f8fa; padding: 14px; border-radius: 8px; overflow-x: auto; }}
+  table:not(.meta) {{ border-collapse: collapse; }} table:not(.meta) td, table:not(.meta) th {{ border: 1px solid #ddd; padding: 6px 10px; }}
+  @media (prefers-color-scheme: dark) {{
+    body {{ background: #0d1117; color: #e6edf3; }}
+    .meta {{ background: #161b22; }} .meta td {{ border-color: #30363d; }} .meta td.k {{ color: #8b949e; }}
+    h1 {{ border-color: #30363d; }} code, pre {{ background: #161b22; }}
+  }}
+</style></head><body>
+<div class="filepath">📗 {_html.escape(str(resolved))}</div>
+{meta_card}
+{body_html}
+</body></html>"""
+        return HTMLResponse(page)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,16 @@
 # src/fulltext.py
 # Nikon Expert — 全文搜索引擎 (Karpathy 式 grep 层)
-# SQLite FTS5，零外部依赖，毫秒级关键词/Error Code 精确匹配
+# SQLite FTS5 + trigram 分词（中文子串匹配），零外部依赖
+#
+# 相对旧版的改动：
+#   1. tokenize='unicode61' -> 'trigram'：unicode61 把连续汉字当成一个 token，
+#      中文关键词几乎搜不到；trigram 做 3 字符子串匹配，中英文通吃。
+#   2. trigram 对 <3 字符的查询词（如「漏水」「载台」）无能为力，
+#      search_fts 检测到短 CJK 词或 MATCH 零命中时自动降级为 LIKE 扫描。
+#      当前数据量（百级文档、千级记录）下 LIKE 也是毫秒级。
+#   3. 其余接口签名、返回格式与旧版完全一致，调用方无需改动。
+#
+# 已有数据的库请先跑 scripts/migrate_fts_trigram.py。
 
 import os
 import re
@@ -15,6 +25,8 @@ load_dotenv()
 _db_path = os.getenv("FTS_DB_PATH", "./data/fts.db")
 _conn: Optional[sqlite3.Connection] = None
 
+_CJK_RE = re.compile(r'[\u4e00-\u9fff\u3040-\u30ff]')
+
 
 def init_fts(db_path: str = None) -> sqlite3.Connection:
     """初始化 FTS5 数据库，返回连接"""
@@ -26,7 +38,7 @@ def init_fts(db_path: str = None) -> sqlite3.Connection:
     _conn.execute("""
         CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
             doc_id, doc_name, doc_type, machine_model, section_title, text,
-            tokenize='unicode61'
+            tokenize='trigram'
         )
     """)
     _conn.execute("""
@@ -93,6 +105,80 @@ def delete_doc_fts_by_name(doc_name: str) -> int:
     return count
 
 
+# ─────────────────────────────────────────────────────────────
+# 查询
+# ─────────────────────────────────────────────────────────────
+
+def _needs_like_fallback(query: str) -> bool:
+    """
+    含 <3 字符 CJK 词的查询 trigram 无法命中，需走 LIKE。
+    去掉 FTS 语法字符后按空白切词判断。
+    """
+    cleaned = re.sub(r'["\*\(\)]', ' ', query)
+    for term in cleaned.split():
+        if _CJK_RE.search(term) and len(term) < 3:
+            return True
+    return False
+
+
+def _row_to_dict(r) -> dict:
+    return {
+        "doc_id": r[0], "doc_name": r[1], "doc_type": r[2],
+        "machine_model": r[3], "section_title": r[4], "text": r[5],
+        "score": r[6], "file_path": r[7],
+        "source": "fts",
+    }
+
+
+def _search_like(query: str, doc_type: str, machine_model: str, limit: int) -> list:
+    """
+    LIKE 子串降级搜索。多词 = AND。
+    评分用命中次数的负数，模拟 bm25 的「越小越好」，
+    保证 router.merge_results 的 abs() 归一化逻辑不用改。
+    """
+    conn = _get_conn()
+    terms = [t for t in re.sub(r'["\*\(\)]', ' ', query).split() if t]
+    if not terms:
+        return []
+
+    # SQL 里的参数出现顺序 = SELECT 的 score 表达式 -> WHERE 条件 -> LIMIT
+    score_params, where_parts, where_params = [], [], []
+    occurrence = []
+    for t in terms:
+        occurrence.append(
+            "((length(doc_fts.text) - length(replace(doc_fts.text, ?, ''))) / length(?))"
+        )
+        score_params.extend([t, t])
+        where_parts.append(
+            "(doc_fts.text LIKE ? OR doc_fts.section_title LIKE ? OR doc_fts.doc_name LIKE ?)"
+        )
+        where_params.extend([f"%{t}%"] * 3)
+    score_expr = " + ".join(occurrence)
+
+    where = " AND ".join(where_parts)
+    if doc_type:
+        where += " AND doc_fts.doc_type = ?"
+        where_params.append(doc_type)
+    if machine_model:
+        where += " AND doc_fts.machine_model = ?"
+        where_params.append(machine_model)
+
+    sql = f"""
+        SELECT
+            doc_fts.doc_id, doc_fts.doc_name, doc_fts.doc_type,
+            doc_fts.machine_model, doc_fts.section_title, doc_fts.text,
+            -({score_expr}) AS score,
+            COALESCE(m.file_path, '') AS file_path
+        FROM doc_fts
+        LEFT JOIN doc_meta m ON doc_fts.doc_id = m.doc_id
+        WHERE {where}
+        ORDER BY score
+        LIMIT ?
+    """
+    rows = conn.execute(sql, score_params + where_params + [limit]).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
 def search_fts(
     query: str,
     doc_type: str = None,
@@ -100,15 +186,17 @@ def search_fts(
     limit: int = 8,
 ) -> list:
     """
-    BM25 全文搜索。
+    BM25 全文搜索（trigram），短 CJK 词 / 零命中时自动降级 LIKE。
     返回: [{"doc_id", "doc_name", "doc_type", "machine_model", "section_title",
             "text", "score", "file_path"}]
     """
     conn = _get_conn()
 
+    if _needs_like_fallback(query):
+        return _search_like(query, doc_type, machine_model, limit)
+
     where = "doc_fts MATCH ?"
     params = [query]
-
     if doc_type:
         where += " AND doc_type = ?"
         params.append(doc_type)
@@ -130,22 +218,22 @@ def search_fts(
     """
     params.append(limit)
 
-    rows = conn.execute(sql, params).fetchall()
-    results = []
-    for r in rows:
-        results.append({
-            "doc_id": r[0], "doc_name": r[1], "doc_type": r[2],
-            "machine_model": r[3], "section_title": r[4], "text": r[5],
-            "score": r[6], "file_path": r[7],
-            "source": "fts",
-        })
-    return results
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        # FTS 语法解析失败（特殊字符等）-> LIKE 兜底
+        return _search_like(query, doc_type, machine_model, limit)
+
+    if not rows:
+        return _search_like(query, doc_type, machine_model, limit)
+
+    return [_row_to_dict(r) for r in rows]
 
 
 def search_fts_exact(code: str, limit: int = 8) -> list:
     """
     精确匹配 Error Code / 部件号。
-    用 FTS5 phrase query: MATCH '"E-5301"'
+    用 FTS5 phrase query: MATCH '"E-5301"'；短码由 search_fts 内部降级兜底。
     """
     quoted = f'"{code}"'
     return search_fts(quoted, limit=limit)
@@ -179,13 +267,11 @@ def index_directory(dir_path: str, pattern: str = "*.md", doc_type: str = "grep_
         results["errors"].append(f"路径不存在：{dir_path}")
         return results
 
-    # 支持分号分隔多 pattern
     patterns = [p.strip() for p in pattern.split(";")]
     files = []
     for pat in patterns:
         files.extend(root.rglob(pat))
 
-    # 去重（同名文件可能匹配多个 pattern）
     seen = set()
     unique_files = []
     for f in files:
@@ -198,7 +284,6 @@ def index_directory(dir_path: str, pattern: str = "*.md", doc_type: str = "grep_
 
     for f in unique_files:
         try:
-            # 跳过不可读文件（iCloud 占位符等）
             f.read_bytes()
         except (OSError, IOError):
             continue
@@ -206,7 +291,6 @@ def index_directory(dir_path: str, pattern: str = "*.md", doc_type: str = "grep_
         rid = hashlib.sha256(str(f).encode()).hexdigest()[:12]
         doc_name = f.name
 
-        # 读取文本
         suffix = f.suffix.lower()
         if suffix in (".md", ".txt", ".markdown", ".rst"):
             try:
@@ -224,10 +308,8 @@ def index_directory(dir_path: str, pattern: str = "*.md", doc_type: str = "grep_
         if not text or len(text) < 5:
             continue
 
-        # 去重：先删旧数据
         delete_doc_fts(rid)
 
-        # 按 ## 标题分区，保持原始结构
         sections = _split_sections(text)
         for sec_title, sec_text in sections:
             if not sec_text.strip():

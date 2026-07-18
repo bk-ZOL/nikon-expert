@@ -11,14 +11,20 @@ cd "$PROJECT_DIR"
 BLUE='\033[0;34m'; GREEN='\033[0;32m'; RED='\033[0;31m'; NC='\033[0m'
 echo -e "${BLUE}🚀 Nikon Expert — 启动界面${NC}"
 
-# 检查 conda 环境
-if ! conda env list | grep -q "^nikon_expert "; then
-    echo -e "${RED}❌ 未找到 conda 环境，请先运行：bash setup.sh${NC}"
+# 选择 Python 运行器：优先 venv，其次 conda
+if [ -x "$PROJECT_DIR/.venv/bin/python" ]; then
+    PYRUN="$PROJECT_DIR/.venv/bin/python"
+    echo -e "${GREEN}使用 venv：.venv/bin/python${NC}"
+elif conda env list 2>/dev/null | grep -q "^nikon_expert "; then
+    PYRUN="conda run -n nikon_expert python3"
+    echo -e "${GREEN}使用 conda 环境：nikon_expert${NC}"
+else
+    echo -e "${RED}❌ 未找到 .venv 或 conda 环境，请先运行：bash setup_venv.sh${NC}"
     exit 1
 fi
 
 # 检查向量库是否有数据
-HAS_DATA=$(conda run -n nikon_expert python3 -c "
+HAS_DATA=$($PYRUN -c "
 import os; os.chdir('$PROJECT_DIR')
 from dotenv import load_dotenv; load_dotenv()
 from src.ingestor import db_status
@@ -55,4 +61,4 @@ echo ""
 echo "按 Ctrl+C 停止服务"
 echo ""
 
-conda run -n nikon_expert python ui/app.py
+exec $PYRUN ui/app.py

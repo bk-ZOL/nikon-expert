@@ -34,7 +34,8 @@ def _get_storage():
     qdrant_path = os.getenv("QDRANT_PATH", "./data/qdrant_db")
     collection  = os.getenv("COLLECTION_NAME", "nikon_expert_v1")
 
-    if Settings.embed_model is None:
+    # 直接查内部属性，避免读 Settings.embed_model 触发 llama_index 的 OpenAI 默认解析器
+    if Settings._embed_model is None:
         from src.device import get_device
         Settings.embed_model = HuggingFaceEmbedding(
             model_name=embed_path, max_length=512, device=get_device()
@@ -238,6 +239,237 @@ def ingest_obsidian(vault_path: str, limit: int = 0) -> int:
     qdrant_client.close()
     print(f"  ✅ 摄入完成，共 {total_nodes} 个 Chunk（{len(readable)} 文件）")
     return total_nodes
+
+
+# ─────────────────────────────────────────────────────────────
+# 1b. OKF（Open Knowledge Format，Google 2026 开放标准）
+#     一个概念=一个 .md（YAML frontmatter + 正文）。这是"标准输入口"：
+#     别处按 OKF 整理好的知识可直接导入本系统的 FTS + 向量库。
+# ─────────────────────────────────────────────────────────────
+def _parse_okf(text: str):
+    """解析 OKF markdown，返回 (frontmatter_dict, body)。无/坏 frontmatter 时 fm={}。"""
+    import yaml
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            try:
+                fm = yaml.safe_load(parts[1])
+            except Exception:
+                fm = None
+            if isinstance(fm, dict):
+                return fm, parts[2].strip()
+    return {}, text.strip()
+
+
+def _as_list(v) -> list:
+    """把 frontmatter 里可能是 str / list 的字段统一成 list[str]。"""
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return [s.strip() for s in str(v).split(",") if s.strip()]
+
+
+def ingest_okf(path: str, limit: int = 0, storage=None) -> int:
+    """摄入 OKF：可传 OKF bundle 目录，或单个 .md 文件。
+
+    storage: 可选 (vector_store, storage_ctx, qdrant_client)。
+        传入则复用（供运行中的 app 内调用，避免重复开 Qdrant client 触发锁冲突）；
+        为空则自建并在结束时关闭（CLI 独立运行模式）。
+
+    frontmatter 映射：
+      type(必填) → doc_type；title → doc_name；description 并入正文利于检索；
+      tags → tags，并从中抽取机型/error code；timestamp|fault_date → fault_date；
+      resource → file_path；额外字段 machine_model / error_codes 直接采纳。
+    正文按 markdown 标题分块，写入向量库 + FTS（与其他摄入器一致，含去重）。
+    log.md（OKF 变更日志）会跳过。
+    """
+    from llama_index.core import VectorStoreIndex, Document
+    from llama_index.core.node_parser import SentenceSplitter
+    from src.router import extract_machine_models, extract_error_codes
+
+    p = Path(path)
+    if p.is_dir():
+        files = [f for f in sorted(p.rglob("*.md")) if f.name.lower() != "log.md"]
+    elif p.suffix.lower() == ".md":
+        files = [p]
+    else:
+        print(f"  ⚠️  OKF 导入需要 .md 文件或目录：{path}")
+        return 0
+    if limit and limit > 0:
+        files = files[:limit]
+    if not files:
+        print("  ❌ 未找到 .md 文件")
+        return 0
+
+    print(f"\n📗 摄入 OKF：{path}（{len(files)} 个文件）")
+    own_storage = storage is None
+    if own_storage:
+        vs, ctx, qdrant_client = _get_storage()
+    else:
+        vs, ctx, qdrant_client = storage
+    collection = os.getenv("COLLECTION_NAME", "nikon_expert_v1")
+    parent_chunk_size = int(os.getenv("PARENT_CHUNK_SIZE", "1024"))
+    total_nodes = 0
+
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8").strip()
+        except (OSError, IOError):
+            continue
+        if not text:
+            continue
+
+        fm, body = _parse_okf(text)
+        if not body:
+            body = text
+
+        rid       = _doc_id(str(f))
+        doc_type  = str(fm.get("type") or "okf_note").strip()
+        title     = str(fm.get("title") or f.stem).strip()
+        doc_name  = title
+        tags      = _as_list(fm.get("tags"))
+        timestamp = str(fm.get("timestamp") or fm.get("fault_date") or "").strip()
+        resource  = str(fm.get("resource") or str(f)).strip()
+        description = str(fm.get("description") or "").strip()
+        language  = str(fm.get("language") or "zh").strip()
+
+        # 机型 / error code：优先显式字段，否则从 tags 抽
+        tag_blob = " ".join(tags)
+        models = _as_list(fm.get("machine_model")) or extract_machine_models(tag_blob)
+        machine_model = models[0] if models else ""
+        ecs = _as_list(fm.get("error_codes")) or _as_list(fm.get("error_code"))
+        ecs = list(dict.fromkeys(ecs + extract_error_codes(tag_blob)))
+
+        # 去重
+        _delete_existing(qdrant_client, collection, doc_name)
+        _fts_delete_by_name(doc_name)
+
+        # description 并入正文开头（提升召回）
+        full = f"{description}\n\n{body}".strip() if description else body
+        sections = _split_by_headings(full, max_chunk=parent_chunk_size)
+
+        docs = []
+        for sec_title, sec_text in sections:
+            if not sec_text.strip():
+                continue
+            sec = sec_title or title
+            meta = {
+                "doc_name":      doc_name,
+                "doc_type":      doc_type,
+                "language":      language,
+                "file_path":     resource,
+                "doc_id":        rid,
+                "chunk_hash":    _chunk_hash(sec_text),
+                "section_title": sec,
+                "tags":          tags,
+            }
+            if machine_model:
+                meta["machine_model"] = machine_model
+            if ecs:
+                meta["error_codes"] = ecs
+            if timestamp:
+                meta["fault_date"] = timestamp
+            docs.append(Document(text=sec_text, metadata=meta))
+            _fts_sync(rid, doc_name, doc_type, machine_model, sec, sec_text, resource)
+
+        if not docs:
+            continue
+        splitter = SentenceSplitter(chunk_size=512, chunk_overlap=64)
+        nodes = splitter.get_nodes_from_documents(docs, show_progress=False)
+        VectorStoreIndex(nodes, storage_context=ctx, show_progress=False)
+        total_nodes += len(nodes)
+
+    if own_storage:
+        qdrant_client.close()
+    print(f"  ✅ OKF 摄入完成，共 {total_nodes} 个 Chunk（{len(files)} 文件）")
+    return total_nodes
+
+
+# ─────────────────────────────────────────────────────────────
+# 1c. 大型电路图 PDF（文字优先，逐页 FTS，存真实页码+路径）
+#     针对 S207 电路图这类 几千页/矢量密集图：整页 VLM 不可行，
+#     文字层才是可查资产（元件名/接线号/信号名/面板单元）。
+# ─────────────────────────────────────────────────────────────
+_BLANK_MARKERS = ("intentionally left blank", "このページは空白")
+
+
+def ingest_circuit_pdf(pdf_path: str, machine_model: str = "", limit: int = 0,
+                       vector: bool = False) -> int:
+    """把大型电路图 PDF 的文字逐页写入 FTS（可选同时向量化，支持中文跨语言检索）。
+
+    每页一条记录，section_title/page_start 记真实页码，file_path 记源 PDF 绝对路径，
+    doc_type=circuit_diagram —— 便于按元件/接线号搜索并定位到确切页。
+    vector=True 时额外用 BGE-M3 向量化每页文字（多语言，可用中文查日/英图纸）。
+    跳过空白页/封面。
+    """
+    import fitz
+
+    path = Path(pdf_path).expanduser().resolve()
+    if not path.exists():
+        print(f"  ❌ 未找到 PDF：{pdf_path}")
+        return 0
+    doc_name = path.name
+    rid = _doc_id(str(path))
+    print(f"\n🔌 摄入电路图（文字层{'＋向量' if vector else ''}）：{doc_name}")
+
+    # 去重旧记录
+    _fts_delete_by_name(doc_name)
+
+    from src.fulltext import init_fts, ingest_fts
+    init_fts(os.getenv("FTS_DB_PATH", "./data/fts.db"))
+
+    vs = ctx = qdrant_client = collection = None
+    if vector:
+        vs, ctx, qdrant_client = _get_storage()
+        collection = os.getenv("COLLECTION_NAME", "nikon_expert_v1")
+        _delete_existing(qdrant_client, collection, doc_name)
+
+    docpdf = fitz.open(str(path))
+    n_pages = len(docpdf)
+    if limit and limit > 0:
+        n_pages = min(n_pages, limit)
+
+    from llama_index.core import VectorStoreIndex, Document
+
+    count = 0
+    batch_docs = []
+    for i in range(n_pages):
+        text = docpdf[i].get_text().strip()
+        if len(text) < 20:
+            continue
+        low = text.lower()
+        if any(m in low for m in _BLANK_MARKERS) and len(text) < 200:
+            continue
+        page = i + 1
+        ingest_fts(
+            f"{rid}_{page}", doc_name, "circuit_diagram", machine_model,
+            f"第{page}页", text, str(path),
+        )
+        if vector:
+            batch_docs.append(Document(
+                text=text[:4000],
+                metadata={
+                    "doc_name": doc_name, "doc_type": "circuit_diagram",
+                    "machine_model": machine_model, "page_start": page,
+                    "file_path": str(path), "doc_id": rid,
+                    "chunk_hash": _chunk_hash(text[:200]),
+                },
+            ))
+        count += 1
+        if count % 500 == 0:
+            print(f"    …已处理 {count} 页")
+            if vector and batch_docs:
+                VectorStoreIndex(batch_docs, storage_context=ctx, show_progress=False)
+                batch_docs = []
+    docpdf.close()
+    if vector and batch_docs:
+        VectorStoreIndex(batch_docs, storage_context=ctx, show_progress=False)
+    if vector and qdrant_client:
+        qdrant_client.close()
+    print(f"  ✅ 电路图摄入完成：{count} 页（源 {n_pages} 页）"
+          + ("＋向量化" if vector else ""))
+    return count
 
 
 # ─────────────────────────────────────────────────────────────

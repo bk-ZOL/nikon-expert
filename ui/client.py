@@ -171,6 +171,29 @@ class BackendClient:
             resp = _req.post(f"{API_BASE}/api/models/switch", params={"model_name": model_name})
             return resp.json().get("message", "")
 
+    def ingest_okf(self, path):
+        """导入 OKF 目录/文件（本地模式直接调 engine）。"""
+        if self.is_local:
+            from src.engine import ingest_okf
+            return ingest_okf(path)
+        else:
+            import requests as _req
+            resp = _req.post(f"{API_BASE}/api/ingest_okf", params={"path": path})
+            return resp.json()
+
+    def switch_provider(self, provider_id, model_name):
+        """切换外接大脑（本地模式直接调 engine）。返回状态文案；缺 key 等错误向上抛。"""
+        if self.is_local:
+            from src.engine import switch_provider
+            return switch_provider(provider_id, model_name)
+        else:
+            import requests as _req
+            resp = _req.post(
+                f"{API_BASE}/api/provider/switch",
+                params={"provider_id": provider_id, "model_name": model_name},
+            )
+            return resp.json().get("message", "")
+
     def get_current_model(self):
         if self.is_local:
             from src.engine import get_current_model

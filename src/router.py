@@ -2,6 +2,7 @@
 # Nikon Expert — 智能路由层 (Karpathy + Gbrain + RAG 融合核心)
 # 查询分类 → 多路召回 → 结果融合
 
+import os
 import re
 from typing import Optional
 
@@ -78,6 +79,29 @@ def auto_mode(question: str) -> str:
         if kw in q:
             return "troubleshoot"
     return "qa"
+
+
+def should_use_agent(question: str, mode: Optional[str] = None) -> bool:
+    """判断该走多步 Agent 排障，还是走单次 RAG 快路径。
+
+    Agent 慢但会自主多步取证，适合故障排查 / 复合问题；
+    简单概念/事实查询走快路径即可。可用环境变量覆盖：
+      AGENT_ENABLED=false  → 一律走快路径（关闭 agent）
+      AGENT_ALWAYS=true    → 一律走 agent（调试用）
+    """
+    if os.getenv("AGENT_ENABLED", "true").lower() in ("0", "false", "no"):
+        return False
+    if os.getenv("AGENT_ALWAYS", "false").lower() in ("1", "true", "yes"):
+        return True
+
+    m = mode or auto_mode(question)
+    # 故障排查类：多步取证收益最大
+    if m == "troubleshoot":
+        return True
+    # 复合问题（多个子问句）：需要跨资料综合
+    if (question.count("？") + question.count("?")) >= 2:
+        return True
+    return False
 
 
 def extract_error_codes(question: str) -> list:
