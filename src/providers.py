@@ -148,7 +148,8 @@ def _httpx_clients(use_proxy: bool):
     """构造 (sync, async) httpx client：海外走 socks5 代理，国内直连。
     trust_env=False 避免误继承环境里的 ALL_PROXY。"""
     import httpx
-    proxy = PROXY if use_proxy else None
+    # PROXY 为空（如墙外服务器）时直连，不走代理
+    proxy = PROXY if (use_proxy and PROXY) else None
     sync = httpx.Client(proxy=proxy, trust_env=False, timeout=REQUEST_TIMEOUT)
     asyncc = httpx.AsyncClient(proxy=proxy, trust_env=False, timeout=REQUEST_TIMEOUT)
     return sync, asyncc

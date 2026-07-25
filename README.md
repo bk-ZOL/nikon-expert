@@ -22,6 +22,50 @@
 
 ---
 
+## 云端部署 + Claude 接入（MCP）
+
+除本地 Gradio 界面外，本项目可部署到云端并作为 **MCP 服务**接入 Claude（Claude Code 与 claude.ai 网页版），让 Claude 直接调用知识库、识读电路图。
+
+### 两种接入形态
+| | Claude Code（本地 CLI） | claude.ai 网页版 |
+|---|---|---|
+| 传输 | `mcp_server.py`（stdio） | `mcp_http_server.py`（streamable-http） |
+| 接法 | `claude mcp add` | 设置 → Connectors → 远程 URL |
+| 前置 | 无 | 公网 HTTPS（Cloudflare Tunnel 等） |
+
+`mcp_http_server.py` 复用 `mcp_server.py` 的工具，仅传输不同；`mcp_tools_extra.py` 注册额外工具。
+
+### MCP 工具（共 10 个）
+- `nikon_query` / `nikon_search` / `nikon_search_error_code` — 检索本地库
+- `nikon_view_diagram` — **电路图识图/追线**：按线号/板号/页号精确取页 → 高清渲染回传 + 完整文字层
+- `nikon_ingest` / `nikon_list_documents` / `nikon_delete_document` / `nikon_get_status` / `nikon_reindex_diagrams`
+- `nikon_ask_wps` — 直接问 WPS/金山知识库（覆盖只存在于 WPS 在线文档、无法本地摄入的内容）
+
+### 电路图"追线路"（`nikon_view_diagram` + 标号倒排）
+- 配置驱动（`src/diagram_config.py`），不硬编码机型/页号/命名规律；新机型只加规则
+- ingest 时抽取线号/板号/连接器号建**倒排索引**（`src/diagram_index.py`，存于 `data/fts.db`），支持增量
+- 按**元件/信号/线号/页号/图号**精确定位页 → `figures.render_pdf_page` 渲染成图交给 Claude 视觉识读
+- 重建索引：`python scripts/build_diagram_index.py`（增量 / `--full`）
+
+### Qdrant 服务器模式（多进程并发）
+本地文件版 Qdrant 单写入；云端需网页版 + MCP 同时访问时，改用 Qdrant server：
+```bash
+docker run -d --name nikon-qdrant --restart unless-stopped \
+  -p 127.0.0.1:6333:6333 -v <data>/qdrant_srv:/qdrant/storage qdrant/qdrant
+```
+在 `.env` 设 `QDRANT_URL=http://127.0.0.1:6333`，各组件自动改走服务器（未设则回退本地文件模式，行为不变）。
+
+### WPS/金山知识库自动增量同步
+将 WPS kwiki 知识库单向同步进本地库（Qdrant + FTS），供检索/识图统一使用：
+- `scripts/sync_kwiki.py` — 镜像 + 增量检测 + 按类型分发摄入（原用 kwiki-cli）
+- `scripts/wps_api.py` — 纯 Python 直连 WPS REST API（`X-Kwiki-Auth`），**无需 kwiki-cli 二进制**，适合无桌面的服务器
+- `scripts/sync_wps.py` — 云端入口（复用 sync_kwiki 逻辑 + HTTP 传输）
+- 配置：`.kwiki_env`（chmod 600）放 `X_KWIKI_AUTH` / `KWIKI_KB_KUID` / `MACHINE_MODEL`
+- 定时：systemd timer 每 30 分钟增量同步
+- 限制：WPS "在线文档"（doc_type=f）/ OTL 智能文档 API 无法下载，改用 `nikon_ask_wps` 直接问 WPS 自带 RAG
+
+---
+
 ## 快速开始（3 步完成）
 
 ### 第 1 步：环境初始化（仅需一次）
@@ -107,8 +151,13 @@ nikon-expert/
 | `LLM_MODEL` | Ollama 模型名 | `qwen2.5:7b-instruct-q8_0` |
 | `LLM_BASE_URL` | Ollama 地址 | `http://localhost:11434` |
 | `EMBED_MODEL_PATH` | BGE-M3 模型路径 | `./models/bge-m3` |
-| `QDRANT_PATH` | 向量数据库路径 | `./data/qdrant_db` |
+| `QDRANT_PATH` | 向量数据库路径（本地文件模式） | `./data/qdrant_db` |
+| `QDRANT_URL` | Qdrant 服务器地址（设了则用 server 模式，多进程并发） | 空（=文件模式） |
 | `FTS_DB_PATH` | 全文搜索数据库路径 | `./data/fts.db` |
+| `LLM_PROVIDER` | 云端大脑 provider（claude/deepseek/…，空=本地 Ollama） | 空 |
+| `MCP_HOST` / `MCP_PORT` | MCP streamable-http 绑定地址 | `127.0.0.1` / `8000` |
+| `X_KWIKI_AUTH` | WPS kwiki token（放 `.kwiki_env`，勿入库） | — |
+| `KWIKI_KB_KUID` | 要同步的 WPS 知识库 kuid（`0s` 开头） | — |
 | `PARENT_CHUNK_SIZE` | PDF 父块大小 | `1024` |
 | `CHILD_CHUNK_SIZE` | PDF 子块大小 | `256` |
 | `CONFIDENCE_THRESHOLD` | 检索置信度阈值 | `0.30` |

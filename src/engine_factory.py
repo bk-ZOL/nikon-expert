@@ -55,7 +55,7 @@ def create_engine(team_id: str = "default"):
         )
 
     # Per-team: Qdrant collection
-    client = QdrantClient(path=qdrant_path)
+    client = QdrantClient(url=os.getenv("QDRANT_URL")) if os.getenv("QDRANT_URL") else QdrantClient(path=qdrant_path)
     existing = [c.name for c in client.get_collections().collections]
     if collection not in existing:
         client.create_collection(

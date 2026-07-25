@@ -44,14 +44,22 @@ def _init_engine():
         device=get_device(),
     )
 
-    print(f"⚙️  连接 LLM：{llm_model} @ {llm_url}")
-    Settings.llm = Ollama(
-        model=llm_model,
-        base_url=llm_url,
-        request_timeout=float(os.getenv("LLM_REQUEST_TIMEOUT", "180")),
-    )
+    # 启动默认 LLM：LLM_PROVIDER 指定云端 provider（如 deepseek）时用它，否则本地 Ollama。
+    # 云端部署（无本地 Ollama）靠这个默认到可用的 API。
+    _provider = os.getenv("LLM_PROVIDER", "").strip()
+    if _provider and _provider not in ("ollama_local", "ollama_lan"):
+        from src.providers import build_llm
+        print(f"⚙️  连接 LLM（provider）：{_provider} / {llm_model}")
+        Settings.llm = build_llm(_provider, llm_model)
+    else:
+        print(f"⚙️  连接 LLM：{llm_model} @ {llm_url}")
+        Settings.llm = Ollama(
+            model=llm_model,
+            base_url=llm_url,
+            request_timeout=float(os.getenv("LLM_REQUEST_TIMEOUT", "180")),
+        )
 
-    client = QdrantClient(path=qdrant_path)
+    client = QdrantClient(url=os.getenv("QDRANT_URL")) if os.getenv("QDRANT_URL") else QdrantClient(path=qdrant_path)
     vector_store = QdrantVectorStore(client=client, collection_name=collection)
     storage_ctx  = StorageContext.from_defaults(vector_store=vector_store)
     index = VectorStoreIndex.from_vector_store(

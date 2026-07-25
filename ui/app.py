@@ -524,36 +524,42 @@ def _register_routes(fastapi_app):
 if __name__ == "__main__":
     import threading
 
+    import time
     port = int(os.getenv("UI_PORT", "7860"))
 
-    # 服务器模式：监听 0.0.0.0，不启动 pywebview
-    is_server = not backend.is_local
-    host = "0.0.0.0" if is_server else "127.0.0.1"
+    # 绑定地址：UI_HOST 优先（云端部署建议绑 Tailscale IP，只在内网可达、不暴露公网）；
+    # 否则本地模式 127.0.0.1、远程模式 0.0.0.0。
+    host = os.getenv("UI_HOST") or ("127.0.0.1" if backend.is_local else "0.0.0.0")
+    # headless（服务器无界面）：显式 HEADLESS、或绑了非 127 地址、或远程模式 → 不开 pywebview
+    headless = bool(os.getenv("HEADLESS")) or host != "127.0.0.1" or (not backend.is_local)
+    probe_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
     url = f"http://{host}:{port}"
 
+    launch_kwargs = {"server_name": host, "server_port": port, "share": False,
+                     "prevent_thread_lock": True, "css": CITATION_CSS}
+    _auth = os.getenv("GRADIO_AUTH", "")   # 形如 user:pass
+    if _auth and ":" in _auth:
+        u, p = _auth.split(":", 1)
+        launch_kwargs["auth"] = (u, p)
+
     demo.queue()
-    server_thread = threading.Thread(
-        target=demo.launch,
-        kwargs={"server_name": host, "server_port": port, "share": False, "prevent_thread_lock": True, "css": CITATION_CSS},
-        daemon=True,
-    )
+    server_thread = threading.Thread(target=demo.launch, kwargs=launch_kwargs, daemon=True)
     server_thread.start()
 
     # 等待 Gradio 服务就绪
-    import time
-    for _ in range(30):
+    for _ in range(40):
         try:
-            _requests.get(f"http://127.0.0.1:{port}", timeout=1)
+            _requests.get(f"http://{probe_host}:{port}", timeout=1)
             break
         except Exception:
             time.sleep(0.5)
 
-    # 本地模式：注册 PDF 服务路由
+    # 本地模式：注册 PDF/图片/markdown 服务路由
     if backend.is_local:
         _register_routes(demo.app)
 
-    if is_server:
-        print(f"🌐 服务器模式运行中：{url}")
+    if headless:
+        print(f"🌐 运行中（headless）：{url}" + ("  [已启用登录]" if launch_kwargs.get("auth") else ""))
         try:
             while True:
                 time.sleep(3600)

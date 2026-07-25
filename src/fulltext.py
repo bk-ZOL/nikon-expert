@@ -15,7 +15,12 @@
 import os
 import re
 import hashlib
-import sqlite3
+# 优先用 pysqlite3（自带新版 SQLite，支持 FTS5 trigram）；
+# 系统 SQLite 太老（如 AlmaLinux 8 的 3.26）时靠它兜底。本地新系统则回退标准库。
+try:
+    import pysqlite3 as sqlite3
+except ImportError:
+    import sqlite3
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv

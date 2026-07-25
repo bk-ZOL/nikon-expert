@@ -42,7 +42,7 @@ def _get_storage():
         )
     Settings.llm = None
 
-    client = QdrantClient(path=qdrant_path)
+    client = QdrantClient(url=os.getenv("QDRANT_URL")) if os.getenv("QDRANT_URL") else QdrantClient(path=qdrant_path)
     existing = [c.name for c in client.get_collections().collections]
     if collection not in existing:
         client.create_collection(
@@ -708,7 +708,7 @@ def db_status() -> dict:
     """返回向量数据库当前状态"""
     from qdrant_client import QdrantClient
 
-    client     = QdrantClient(path=os.getenv("QDRANT_PATH", "./data/qdrant_db"))
+    client     = QdrantClient(url=os.getenv("QDRANT_URL")) if os.getenv("QDRANT_URL") else QdrantClient(path=os.getenv("QDRANT_PATH", "./data/qdrant_db"))
     collection = os.getenv("COLLECTION_NAME", "nikon_expert_v1")
     try:
         info = client.get_collection(collection)
