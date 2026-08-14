@@ -381,19 +381,35 @@ def _switch_view(target):
 
 
 def do_ingest_files(paths):
-    """多文件上传向量化 + 自动刷新文档表（修『上传后列表不显示』）。"""
+    """多文件上传向量化——流式进度 + 每传完一个刷新文档表。
+
+    PDF 在 CPU 上向量化较慢（无 GPU，BGE-M3 单线程，大文件可能数分钟），
+    故做成生成器：先给"正在向量化"反馈，避免看着像卡死；写完再刷新列表。
+    """
     if not paths:
-        return "⚠️ 请先选择文件", do_get_kb_docs()
+        yield "⚠️ 请先选择文件", gr.update()
+        return
     if not isinstance(paths, list):
         paths = [paths]
+    files = [(p if isinstance(p, str) else getattr(p, "name", None)) for p in paths]
+    files = [f for f in files if f]
+    n = len(files)
+    if not n:
+        yield "⚠️ 未取到文件路径", gr.update()
+        return
+    yield f"⏳ 开始向量化 {n} 个文件…（PDF 在 CPU 上较慢，请耐心等，勿关页面）", gr.update()
     msgs = []
-    for p in paths:
-        fp = p if isinstance(p, str) else getattr(p, "name", None)
-        if not fp:
-            continue
-        r = backend.ingest_file(fp)
-        msgs.append(r.get("message", str(r)) if isinstance(r, dict) else str(r))
-    return ("\n".join(msgs) or "（无文件）"), do_get_kb_docs()
+    for i, fp in enumerate(files, 1):
+        base = os.path.basename(fp)
+        yield f"⏳ 正在向量化 第 {i}/{n} 个：**{base}** …（可能需数分钟）\n" + "\n".join(msgs), gr.update()
+        try:
+            r = backend.ingest_file(fp)
+            msgs.append(r.get("message", str(r)) if isinstance(r, dict) else str(r))
+        except Exception as e:
+            msgs.append(f"❌ {base}：{e}")
+        # 每传完一个就刷新列表
+        yield f"进度 {i}/{n} 完成：\n" + "\n".join(msgs), do_get_kb_docs()
+    yield ("✅ 全部完成：\n" + "\n".join(msgs)), do_get_kb_docs()
 
 
 def do_error_lookup(code, request: gr.Request = None):
