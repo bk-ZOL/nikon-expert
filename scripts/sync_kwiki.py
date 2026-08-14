@@ -87,6 +87,13 @@ DIR_MAP = [
 EXT_MAP = {"w": ".docx", "s": ".xlsx", "p": ".pptx", "d": ".dbt"}
 # OTL 智能文档 file-download 会报业务错误，直接跳过
 UNDOWNLOADABLE = {"o"}
+# 这些 WPS 业务错误码 = 文档类型 API 根本不支持导出（在线文档"f"400408003、
+# dbt/智能文档 400408000），非网络/临时故障 → 归为「不可下载」而非「失败」。
+# 不写 state：每轮仍轻量探测一次（4xx 不重试，一次调用即返回），
+# 将来若该文档转成可导出格式能自动补入。
+UNDOWNLOADABLE_CODES = ("400408003", "400408000")
+# download_file 的第三态哨兵：区别于 True(成功)/False(真失败)
+_UNDOWNLOADABLE = object()
 INGESTABLE_SUFFIXES = {".docx", ".pdf", ".md", ".xlsx", ".csv", ".txt"}
 # 超过此大小不下载（视频等），单位 MB
 MAX_FILE_MB = float(os.getenv("MAX_FILE_MB", "50"))
@@ -206,12 +213,17 @@ def walk_kb(kuid: str, rel_path: str = "") -> list:
     return out
 
 
-def download_file(kuid: str, dest: Path) -> bool:
-    """file-download(file_base64) -> 写入 dest。失败返回 False。"""
+def download_file(kuid: str, dest: Path):
+    """file-download(file_base64) -> 写入 dest。
+    返回 True=成功 / _UNDOWNLOADABLE=文档类型不支持导出 / False=真失败。"""
     try:
         payload = run_cli("file-download", "--kuid", kuid,
                           "--response-type", "file_base64")
     except RuntimeError as e:
+        msg = str(e)
+        if any(code in msg for code in UNDOWNLOADABLE_CODES):
+            print(f"    ⏭  在线文档 API 无法导出，跳过: {dest.name}")
+            return _UNDOWNLOADABLE
         print(f"    ⚠️  下载失败 {dest.name}: {e}")
         return False
 
@@ -395,7 +407,11 @@ def main():
             stats["synced"] += 1
             continue
 
-        if not download_file(f["kuid"], dest):
+        res = download_file(f["kuid"], dest)
+        if res is _UNDOWNLOADABLE:
+            stats["skipped_undownloadable"] += 1
+            continue
+        if not res:
             stats["failed"] += 1
             continue
 
