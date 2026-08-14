@@ -190,3 +190,68 @@ def nikon_ask_wps(question: str, kuid: str = "") -> str:
     if r.get("sources"):
         out.append("\n---\n来源(WPS 文档): " + " | ".join(r["sources"][:6]))
     return "\n".join(out)
+
+
+@mcp.tool()
+def nikon_query_worklog(recent_days: int = 7, date_from: str = "", date_to: str = "") -> str:
+    """Read the field-engineering WORKLOG (工作日志) LIVE from Feishu — always the
+    newest version, fetched on demand (NOT from the vector KB).
+
+    分工 / when to use which:
+      • nikon_query_worklog (this): 「最近日报写了啥 / 这几天进展/待协助事项」——
+        永远返回飞书里的最新原文，按天精确取，适合近期动态、今日/本周计划。
+      • nikon_query: 语义检索**历史**日志与全部手册/故障库，适合「之前哪天提过 X /
+        某问题历史上怎么处理」这类跨时间的模糊查询（走向量库，可能不含刚写的今天）。
+
+    Args:
+        recent_days: 返回最近 N 天日报（默认 7）。若填了 date_from 则忽略本参数。
+        date_from:  起始日期 'YYYY-MM-DD'（含）。
+        date_to:    截止日期 'YYYY-MM-DD'（含），默认今天。
+    """
+    import os
+    import sys as _sys
+    _sp = "/opt/nikon-expert/scripts"
+    if _sp not in _sys.path:
+        _sys.path.insert(0, _sp)
+    # 确保飞书配置/token 可见（即使不在 service env）
+    try:
+        from dotenv import load_dotenv
+        load_dotenv("/opt/nikon-expert/.feishu_env", override=False)
+        load_dotenv("/opt/nikon-expert/.env", override=False)
+    except Exception:
+        pass
+
+    url = os.getenv("FEISHU_WORKLOG_URL", "").strip()
+    if not url:
+        return "未配置 FEISHU_WORKLOG_URL（在 .feishu_env 里配工作日志链接）。"
+    try:
+        import feishu_client
+    except Exception as e:
+        return f"飞书客户端加载失败：{e}"
+    try:
+        wl = feishu_client.fetch_worklog(url)
+    except Exception as e:
+        return (f"读取飞书工作日志失败：{e}\n"
+                "（若提示 token 过期/未授权，请在本机重跑 "
+                "`python scripts/feishu_auth.py login` 再试。）")
+
+    days = wl.get("days") or []          # 最新在前
+    if not days:
+        return "飞书日志里没解析出按日期的日报，检查文档日期行格式。"
+
+    if date_from:
+        end = date_to or date_from[:4] + "-12-31"
+        sel = [d for d in days if date_from <= d["date"] <= (date_to or "9999-12-31")]
+        scope = f"{date_from}…{date_to or '今'}"
+    else:
+        n = max(1, int(recent_days))
+        sel = days[:n]
+        scope = f"最近 {len(sel)} 天"
+
+    if not sel:
+        return f"指定范围（{scope}）内没有日报。可用日期：{days[0]['date']} … {days[-1]['date']}。"
+
+    title = wl.get("title") or "飞书工作日志"
+    head = f"【{title} · {scope} · 实时读取自飞书】\n可用日期范围 {days[-1]['date']} … {days[0]['date']}"
+    body = "\n\n────────────\n".join(d["text"] for d in sel)
+    return head + "\n\n" + body

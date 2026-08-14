@@ -93,6 +93,8 @@ def _init_engine():
 
     _engine = {
         "retriever": retriever,
+        "index": index,           # 供按请求构建带 ACL filter 的 retriever
+        "top_k": top_k,
         "reranker": reranker,
         "client": client,
         "collection": collection,
@@ -379,13 +381,18 @@ def engine_db_status() -> dict:
 
 # ── 路由融合检索（核心）──────────────────────────────────────
 
-def _retrieve_with_router(question: str, mode: str = "qa") -> list:
+def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
     """
     智能路由检索：分类查询 → FTS + 语义双路召回 → 融合排序
     返回: [{"doc_name", "doc_type", "text", "score", "source", ...}, ...]
+
+    user: acl.User。security 开启时 FTS 与向量两路各自独立完成 ACL 预过滤
+    （方案 4.5：两路都必须已过滤，否则融合排名失真且越权内容进上下文）。
     """
-    from src.router import classify_query, get_route_weights, merge_results, extract_machine_models
+    from src.router import (classify_query, get_route_weights, merge_results,
+                            extract_machine_models, extract_key_terms, is_circuit_query)
     from src.fulltext import search_fts, search_fts_exact
+    from src import acl
 
     threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.30"))
     top_k = int(os.getenv("RETRIEVAL_TOP_K", "8"))
@@ -404,27 +411,64 @@ def _retrieve_with_router(question: str, mode: str = "qa") -> list:
         from src.router import extract_error_codes
         codes = extract_error_codes(question)
         if codes:
-            fts_results = search_fts_exact(codes[0], limit=top_k)
+            fts_results = search_fts_exact(codes[0], limit=top_k, user=user)
         else:
             # 用主要关键词做 FTS 搜索
             fts_query = question.replace("？", "").replace("?", "").strip()
             if fts_query:
-                fts_results = search_fts(fts_query, limit=top_k)
+                fts_results = search_fts(fts_query, limit=top_k, user=user)
+            # 实体优先：对显著领域名词（氦气/encoder…）各做一次定向 FTS，
+            # 保证这类"细节名词"不被整句里的高频词淹没（追加进 FTS 候选池）。
+            seen_terms = set()
+            for term in extract_key_terms(question)[:4]:
+                if term in seen_terms:
+                    continue
+                seen_terms.add(term)
+                fts_results += search_fts(term, limit=5, user=user)
+    except acl.PermissionDenied:
+        raise
     except Exception:
         pass
 
-    # ── 3. 语义检索 (Gbrain 层)
+    # ── 3. 语义检索 (Gbrain 层)：按请求注入 ACL filter，失败则 fail-closed
     semantic_results = []
     try:
-        nodes = eng["retriever"].retrieve(question)
+        nodes = _retrieve_semantic(eng, question, user, top_k)
         semantic_results = [n for n in nodes if (n.score or 0.0) >= threshold]
-    except (ValueError, Exception):
+    except acl.PermissionDenied:
+        raise
+    except Exception:
         pass
 
-    # ── 4. 融合
-    merged = merge_results(fts_results, semantic_results, fts_w, sem_w, top_n=top_k)
+    # ── 4. 融合（非电路类问题压制逐页电路图，避免刷屏挤掉手册答案）
+    merged = merge_results(fts_results, semantic_results, fts_w, sem_w, top_n=top_k,
+                           demote_circuit=not is_circuit_query(question))
 
     return merged, qtype
+
+
+def _retrieve_semantic(eng: dict, question: str, user, top_k: int) -> list:
+    """向量检索。security 开启时用带 ACL 的 qdrant Filter 现建 retriever 预过滤。
+
+    security 关 → 用缓存的默认 retriever（行为不变）。
+    security 开 → 注入 build_qdrant_filter；若注入机制异常，fail-closed 返回 []，
+    绝不回退到未过滤检索（宁可查不到，不可越权带出他人资料）。
+    """
+    from src import acl
+    if not acl.security_enabled():
+        return eng["retriever"].retrieve(question)
+
+    qfilter = acl.build_qdrant_filter(user)  # 无身份会抛 PermissionDenied
+    if qfilter is None:  # 超级用户
+        return eng["retriever"].retrieve(question)
+
+    from llama_index.core.retrievers import VectorIndexRetriever
+    retriever = VectorIndexRetriever(
+        index=eng["index"],
+        similarity_top_k=top_k,
+        vector_store_kwargs={"qdrant_filters": qfilter},
+    )
+    return retriever.retrieve(question)
 
 
 def _build_context(merged_results: list, mode: str = "qa") -> tuple:
@@ -465,8 +509,15 @@ def _build_context(merged_results: list, mode: str = "qa") -> tuple:
         # 来源标注
         source_label = {"fts": "关键词", "semantic": "语义", "fts+semantic": "双引擎"}.get(source, source)
 
+        # 适用机型：优先元数据，回退从文档名里推断（很多手册名含型号）
+        mm = (r.get("machine_model") or "").strip()
+        if not mm:
+            import re as _re
+            _hit = _re.findall(r"NSR-S\w+|NSR-SF\w+|S\d{3}[A-Z]", f"{doc_name}")
+            mm = " / ".join(dict.fromkeys(_hit)) if _hit else "未标注"
+
         ctx_parts.append(
-            f"[参考资料 {i}] 来源：{cite}\n检索方式：{source_label}\n"
+            f"[参考资料 {i}] 来源：{cite}\n适用机型：{mm}\n检索方式：{source_label}\n"
             f"内容：\n{text}\n" + "─" * 50
         )
         citations.append(f"[{i}] {cite}  ({source_label})")
@@ -520,49 +571,64 @@ def _agent_query_stream(question: str, history: list = None):
         yield "", True, [], [], False
 
 
-def query_stream(question: str, mode: str = "qa", history: list = None):
-    """流式查询：智能路由决定走多步 Agent 还是单次 RAG 快路径。"""
+def query_stream(question: str, mode: str = "qa", history: list = None, user=None):
+    """流式查询：智能路由决定走多步 Agent 还是单次 RAG 快路径。
+
+    user: acl.User。绑定到 contextvar，使 agent 工具路径深处的检索也按 ACL 过滤。
+    """
     from src.prompts import KNOWLEDGE_QA_PROMPT, TROUBLESHOOTING_PROMPT, NO_RESULT_RESPONSE
     from src.router import should_use_agent
     from llama_index.core import Settings
+    from src import acl
 
-    # ── 智能路由：故障排查 / 复合问题 → 多步 Agent
-    if should_use_agent(question, mode):
-        yield from _agent_query_stream(question, history)
-        return
+    if user is None:                      # 上层（如 Gradio chat）可能已绑 contextvar
+        user = acl.get_current_user()
+    _tok = acl.set_current_user(user)
+    try:
+        # ── 智能路由：故障排查 / 复合问题 → 多步 Agent
+        if should_use_agent(question, mode):
+            yield from _agent_query_stream(question, history)
+            return
 
-    merged, qtype = _retrieve_with_router(question, mode)
-    context, citations, citations_data, has_result = _build_context(merged, mode)
+        merged, qtype = _retrieve_with_router(question, mode, user=user)
+        context, citations, citations_data, has_result = _build_context(merged, mode)
 
-    if not has_result:
-        yield NO_RESULT_RESPONSE, True, [], [], False
-        return
+        if not has_result:
+            yield NO_RESULT_RESPONSE, True, [], [], False
+            return
 
-    # 多轮对话历史
-    history_prefix = ""
-    if history:
-        recent = history[-6:]
-        turns = []
-        for msg in recent:
-            role = "工程师" if msg["role"] == "user" else "助手"
-            turns.append(f"{role}：{msg['content'][:400]}")
-        history_prefix = "【对话历史（最近几轮）】\n" + "\n".join(turns) + "\n\n"
+        # 多轮对话历史
+        history_prefix = ""
+        if history:
+            recent = history[-6:]
+            turns = []
+            for msg in recent:
+                role = "工程师" if msg["role"] == "user" else "助手"
+                turns.append(f"{role}：{msg['content'][:400]}")
+            history_prefix = "【对话历史（最近几轮）】\n" + "\n".join(turns) + "\n\n"
 
-    prompt_tmpl = TROUBLESHOOTING_PROMPT if mode == "troubleshoot" else KNOWLEDGE_QA_PROMPT
-    final_prompt = prompt_tmpl.format(context=context, query=history_prefix + question)
+        prompt_tmpl = TROUBLESHOOTING_PROMPT if mode == "troubleshoot" else KNOWLEDGE_QA_PROMPT
+        final_prompt = prompt_tmpl.format(context=context, query=history_prefix + question)
 
-    for token in Settings.llm.stream_complete(final_prompt):
-        yield token.delta, False, [], [], True
+        for token in Settings.llm.stream_complete(final_prompt):
+            yield token.delta, False, [], [], True
 
-    yield "", True, citations, citations_data, True
+        yield "", True, citations, citations_data, True
+    finally:
+        acl.reset_current_user(_tok)
 
 
-def query(question: str, mode: str = "qa") -> dict:
+def query(question: str, mode: str = "qa", user=None) -> dict:
     """执行一次完整查询（非流式）"""
     from src.prompts import KNOWLEDGE_QA_PROMPT, TROUBLESHOOTING_PROMPT, NO_RESULT_RESPONSE
     from llama_index.core import Settings
+    from src import acl
 
-    merged, qtype = _retrieve_with_router(question, mode)
+    _tok = acl.set_current_user(user)
+    try:
+        merged, qtype = _retrieve_with_router(question, mode, user=user)
+    finally:
+        acl.reset_current_user(_tok)
     context, citations, citations_data, has_result = _build_context(merged, mode)
 
     if not has_result:

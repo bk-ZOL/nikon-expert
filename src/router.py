@@ -36,6 +36,84 @@ CONCEPT_KEYWORDS = [
     "机制", "作用", "功能", "含义", "意义",
 ]
 
+# ── 材料/气体/介质词典 ───────────────────────────────────────────
+# 这类"细节名词"常只在某份手册里一句话带过，整句检索时会被高频词（如 laser/stage）
+# 淹没。抽出来做实体优先的定向 FTS，专治"资料里明明有却搜不到"。
+MATERIALS = [
+    "氦气", "氦", "helium",
+    "氮气", "氮", "nitrogen",
+    "氟气", "氟", "fluorine", "f2",
+    "氩气", "氩", "argon",
+    "氖", "neon",
+    "氧气", "氧", "oxygen",
+    "氢气", "氢", "hydrogen",
+    "二氧化碳", "co2",
+    "臭氧", "ozone",
+    "cda", "压缩空气", "compressed air",
+    "冷却水", "cooling water", "纯水", "di water",
+    "真空", "vacuum",
+    "氨", "ammonia",
+    "润滑脂", "油脂", "grease", "lubrican",
+    "冷媒", "制冷剂", "coolant",
+]
+
+# 电路图类查询关键词：命中则不降权 circuit_diagram（用户就是要查图）
+CIRCUIT_KEYWORDS = [
+    "电路", "接线", "线号", "端子", "配线", "结线", "板卡", "图纸", "连接器",
+    "circuit", "wiring", "diagram", "schematic", "connector", "pin", "harness",
+]
+
+
+# 跨语言同义扩展：中文问法也去搜英文原文（三语库的系统性召回缺口）。
+# 只列"完整词"，不列 he/n2/f2 这类超短词（trigram 会误召回一堆）。
+MATERIAL_SYNONYMS = {
+    "氦气": ["helium"], "氦": ["helium"], "helium": ["氦气", "氦"],
+    "氮气": ["nitrogen"], "氮": ["nitrogen"], "nitrogen": ["氮气", "氮"],
+    "氟气": ["fluorine"], "氟": ["fluorine"], "fluorine": ["氟气", "氟"],
+    "氩气": ["argon"], "氩": ["argon"], "argon": ["氩气", "氩"],
+    "氖": ["neon"], "neon": ["氖"],
+    "氧气": ["oxygen"], "氧": ["oxygen"], "oxygen": ["氧气", "氧"],
+    "氢气": ["hydrogen"], "氢": ["hydrogen"], "hydrogen": ["氢气", "氢"],
+    "臭氧": ["ozone"], "ozone": ["臭氧"],
+    "压缩空气": ["compressed air", "cda"], "cda": ["compressed air", "压缩空气"],
+    "冷却水": ["cooling water"], "cooling water": ["冷却水"],
+    "真空": ["vacuum"], "vacuum": ["真空"],
+    "氨": ["ammonia"], "ammonia": ["氨"],
+    "润滑脂": ["grease"], "油脂": ["grease"], "grease": ["润滑脂", "油脂"],
+    "冷媒": ["coolant"], "制冷剂": ["coolant"], "coolant": ["冷媒", "制冷剂"],
+}
+
+
+def extract_key_terms(question: str) -> list:
+    """抽取问题里的显著领域名词（材料/气体在前、部件在后）+ 跨语言同义词，
+    用于实体优先的定向 FTS。去重保序；材料词优先，保证细节名词一定被单独检索到。"""
+    q = question.lower()
+    out, seen = [], set()
+
+    def _add(t):
+        tl = t.lower()
+        if len(t) >= 2 and tl not in seen:
+            seen.add(tl)
+            out.append(t)
+
+    for t in MATERIALS + COMPONENTS:
+        if len(t) >= 2 and t.lower() in q:
+            _add(t)
+            for syn in MATERIAL_SYNONYMS.get(t.lower(), []):
+                _add(syn)
+    # 英文缩写/子系统名（SMIF/OHT/FOUP/RSP/AIS/WLL…）：问题里的全大写 token 多是
+    # 关键技术名，整句检索易被稀释，单独定向检索。排除已单独处理的 Error Code。
+    for tok in re.findall(r"\b[A-Z][A-Z0-9]{1,7}\b", question):
+        if not ERROR_CODE_RE.match(tok):
+            _add(tok)
+    return out
+
+
+def is_circuit_query(question: str) -> bool:
+    """是否明确在查电路/接线图（此时不压制 circuit_diagram）。"""
+    q = question.lower()
+    return any(k in q for k in CIRCUIT_KEYWORDS)
+
 
 def classify_query(question: str) -> str:
     """
@@ -139,6 +217,9 @@ def merge_results(
     fts_weight: float = 0.5,
     semantic_weight: float = 0.5,
     top_n: int = 6,
+    demote_circuit: bool = False,
+    circuit_cap: int = 2,
+    circuit_penalty: float = 0.25,
 ) -> list:
     """
     融合 FTS 和语义检索结果。
@@ -206,6 +287,25 @@ def merge_results(
             entry["score"] = norm_score
             merged[key] = entry
 
-    # ── 排序取 top_n
+    # ── 非电路类问题：压制逐页电路图（否则含 laser/stage 的问题会被图纸刷屏，
+    #    把只在手册里一句话的答案挤出候选集）。降权 + 硬限额双保险。
+    if demote_circuit:
+        for e in merged.values():
+            if e.get("doc_type") == "circuit_diagram":
+                e["score"] *= circuit_penalty
+
     ranked = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
+
+    if demote_circuit:
+        out, n_circ = [], 0
+        for e in ranked:
+            if e.get("doc_type") == "circuit_diagram":
+                if n_circ >= circuit_cap:
+                    continue          # top_n 里最多留 circuit_cap 个电路图
+                n_circ += 1
+            out.append(e)
+            if len(out) >= top_n:
+                break
+        return out
+
     return ranked[:top_n]

@@ -23,3 +23,10 @@ build/
 
 # WPS token
 .kwiki_env
+
+# Feishu / 飞书 凭据与 token
+.feishu_env
+.feishu_token.json
+
+# 本地虚拟环境
+.venv/
