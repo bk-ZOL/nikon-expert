@@ -135,13 +135,15 @@ def _row_to_dict(r) -> dict:
     }
 
 
-def _search_like(query: str, doc_type: str, machine_model: str, limit: int) -> list:
+def _search_like(query: str, doc_type: str, machine_model: str, limit: int, user=None) -> list:
     """
     LIKE 子串降级搜索。多词 = AND。
     评分用命中次数的负数，模拟 bm25 的「越小越好」，
     保证 router.merge_results 的 abs() 归一化逻辑不用改。
     """
     conn = _get_conn()
+    from src import acl
+    acl_clause, acl_params = acl.fts_acl_clause(user)  # security 关闭→("", [])
     terms = [t for t in re.sub(r'["\*\(\)]', ' ', query).split() if t]
     if not terms:
         return []
@@ -167,6 +169,8 @@ def _search_like(query: str, doc_type: str, machine_model: str, limit: int) -> l
     if machine_model:
         where += " AND doc_fts.machine_model = ?"
         where_params.append(machine_model)
+    where += acl_clause
+    where_params += acl_params
 
     sql = f"""
         SELECT
@@ -189,16 +193,22 @@ def search_fts(
     doc_type: str = None,
     machine_model: str = None,
     limit: int = 8,
+    user=None,
 ) -> list:
     """
     BM25 全文搜索（trigram），短 CJK 词 / 零命中时自动降级 LIKE。
     返回: [{"doc_id", "doc_name", "doc_type", "machine_model", "section_title",
             "text", "score", "file_path"}]
+
+    user: acl.User。security 开启时按 ACL 预过滤（过滤先于 LIMIT，避免召回塌陷）。
     """
     conn = _get_conn()
 
+    from src import acl
+    acl_clause, acl_params = acl.fts_acl_clause(user)  # security 关闭→("", [])
+
     if _needs_like_fallback(query):
-        return _search_like(query, doc_type, machine_model, limit)
+        return _search_like(query, doc_type, machine_model, limit, user)
 
     where = "doc_fts MATCH ?"
     params = [query]
@@ -208,6 +218,8 @@ def search_fts(
     if machine_model:
         where += " AND machine_model = ?"
         params.append(machine_model)
+    where += acl_clause
+    params += acl_params
 
     sql = f"""
         SELECT
@@ -227,21 +239,21 @@ def search_fts(
         rows = conn.execute(sql, params).fetchall()
     except sqlite3.OperationalError:
         # FTS 语法解析失败（特殊字符等）-> LIKE 兜底
-        return _search_like(query, doc_type, machine_model, limit)
+        return _search_like(query, doc_type, machine_model, limit, user)
 
     if not rows:
-        return _search_like(query, doc_type, machine_model, limit)
+        return _search_like(query, doc_type, machine_model, limit, user)
 
     return [_row_to_dict(r) for r in rows]
 
 
-def search_fts_exact(code: str, limit: int = 8) -> list:
+def search_fts_exact(code: str, limit: int = 8, user=None) -> list:
     """
     精确匹配 Error Code / 部件号。
     用 FTS5 phrase query: MATCH '"E-5301"'；短码由 search_fts 内部降级兜底。
     """
     quoted = f'"{code}"'
-    return search_fts(quoted, limit=limit)
+    return search_fts(quoted, limit=limit, user=user)
 
 
 def fts_status() -> dict:

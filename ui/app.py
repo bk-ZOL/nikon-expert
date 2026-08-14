@@ -39,11 +39,25 @@ except Exception:
 
 
 # ── 回调函数 ─────────────────────────────────────────────────────
-def chat(question: str, history: list):
+def _resolve_login_user(request):
+    """从 Gradio 登录态解析 acl.User。security 关→None(不过滤)。
+    开启但解析不到有效用户→抛错(fail-closed，宁可拒绝不放行)。"""
+    from src import acl
+    if not acl.security_enabled():
+        return None
+    uid = getattr(request, "username", None) if request is not None else None
+    if not uid:
+        raise acl.PermissionDenied("未登录")
+    from src.fulltext import _get_conn
+    return acl.load_user(uid, _get_conn())
+
+
+def chat(question: str, history: list, request: gr.Request = None):
     if not question.strip():
         yield (history or []), "", ""
         return
     from src.router import auto_mode
+    from src import acl
     mode_key = auto_mode(question)
     history = history or []
 
@@ -53,20 +67,36 @@ def chat(question: str, history: list):
     ]
     yield new_history, "", ""
 
+    # 绑定登录用户到 contextvar：本地模式下引擎深处（含 agent 工具）据此按 ACL 过滤
+    try:
+        _user = _resolve_login_user(request)
+    except acl.PermissionDenied:
+        new_history[-1]["content"] = "⛔ 未识别到登录身份，无法检索。请重新登录。"
+        yield new_history, "", ""
+        return
+    _tok = acl.set_current_user(_user)
+
     accumulated = ""
     citations_data = []
-    for delta, is_final, citations, cit_data, has_result in backend.query_stream(question, mode=mode_key, history=history):
-        if is_final:
-            if has_result and citations:
-                citations_data = cit_data
-                sources = "\n\n**📚 参考来源：**\n" + "\n".join(f"- {c}" for c in citations)
-                new_history[-1]["content"] = accumulated + sources
+    try:
+        for delta, is_final, citations, cit_data, has_result in backend.query_stream(question, mode=mode_key, history=history):
+            if is_final:
+                if has_result and citations:
+                    citations_data = cit_data
+                    sources = "\n\n**📚 参考来源：**\n" + "\n".join(f"- {c}" for c in citations)
+                    new_history[-1]["content"] = accumulated + sources
+                else:
+                    new_history[-1]["content"] = accumulated or delta
             else:
-                new_history[-1]["content"] = accumulated or delta
-        else:
-            accumulated += delta
-            new_history[-1]["content"] = accumulated
+                accumulated += delta
+                new_history[-1]["content"] = accumulated
+            yield new_history, "", ""
+    except acl.PermissionDenied:
+        new_history[-1]["content"] = "⛔ 权限不足，无法检索到你有权访问的资料。"
         yield new_history, "", ""
+        return
+    finally:
+        acl.reset_current_user(_tok)
 
     cit_html = _build_citation_buttons(citations_data)
     yield new_history, "", cit_html
@@ -537,10 +567,24 @@ if __name__ == "__main__":
 
     launch_kwargs = {"server_name": host, "server_port": port, "share": False,
                      "prevent_thread_lock": True, "css": CITATION_CSS}
-    _auth = os.getenv("GRADIO_AUTH", "")   # 形如 user:pass
-    if _auth and ":" in _auth:
-        u, p = _auth.split(":", 1)
-        launch_kwargs["auth"] = (u, p)
+    # 登录：security 开启 → 逐人校验 users 表(per-user 身份，驱动 ACL)；
+    #       否则回退单一共享账号 GRADIO_AUTH(向后兼容)。
+    from src import acl
+    if acl.security_enabled():
+        def _multi_user_auth(username, password):
+            try:
+                from src.fulltext import _get_conn
+                return acl.verify_login(username, password, _get_conn())
+            except Exception:
+                return False
+        launch_kwargs["auth"] = _multi_user_auth
+        launch_kwargs["auth_message"] = "Nikon Expert — 请用个人账号登录（资料按权限可见）"
+        print("🔐 登录模式：per-user（users 表校验，ACL 生效）")
+    else:
+        _auth = os.getenv("GRADIO_AUTH", "")   # 形如 user:pass
+        if _auth and ":" in _auth:
+            u, p = _auth.split(":", 1)
+            launch_kwargs["auth"] = (u, p)
 
     demo.queue()
     server_thread = threading.Thread(target=demo.launch, kwargs=launch_kwargs, daemon=True)
