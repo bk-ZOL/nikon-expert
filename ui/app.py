@@ -381,35 +381,50 @@ def _switch_view(target):
 
 
 def do_ingest_files(paths):
-    """多文件上传向量化——流式进度 + 每传完一个刷新文档表。
-
-    PDF 在 CPU 上向量化较慢（无 GPU，BGE-M3 单线程，大文件可能数分钟），
-    故做成生成器：先给"正在向量化"反馈，避免看着像卡死；写完再刷新列表。
-    """
+    """异步上传：文件入队即返回，后台单线程串行摄入（不阻塞界面/查询）。
+    PDF 在 CPU 上较慢也没关系——用户不用干等，任务面板显示进度，完成自动进列表。"""
+    from src import ingest_queue
     if not paths:
-        yield "⚠️ 请先选择文件", gr.update()
-        return
+        return "⚠️ 请先选择文件"
     if not isinstance(paths, list):
         paths = [paths]
-    files = [(p if isinstance(p, str) else getattr(p, "name", None)) for p in paths]
-    files = [f for f in files if f]
-    n = len(files)
+    n = 0
+    for p in paths:
+        fp = p if isinstance(p, str) else getattr(p, "name", None)
+        if fp:
+            ingest_queue.enqueue(fp, os.path.basename(fp))
+            n += 1
     if not n:
-        yield "⚠️ 未取到文件路径", gr.update()
-        return
-    yield f"⏳ 开始向量化 {n} 个文件…（PDF 在 CPU 上较慢，请耐心等，勿关页面）", gr.update()
-    msgs = []
-    for i, fp in enumerate(files, 1):
-        base = os.path.basename(fp)
-        yield f"⏳ 正在向量化 第 {i}/{n} 个：**{base}** …（可能需数分钟）\n" + "\n".join(msgs), gr.update()
-        try:
-            r = backend.ingest_file(fp)
-            msgs.append(r.get("message", str(r)) if isinstance(r, dict) else str(r))
-        except Exception as e:
-            msgs.append(f"❌ {base}：{e}")
-        # 每传完一个就刷新列表
-        yield f"进度 {i}/{n} 完成：\n" + "\n".join(msgs), do_get_kb_docs()
-    yield ("✅ 全部完成：\n" + "\n".join(msgs)), do_get_kb_docs()
+        return "⚠️ 未取到文件路径"
+    return (f"✅ 已加入队列（{n} 个），后台处理中——**不用等，可继续用**。"
+            "完成后会自动出现在下方「向量库文档管理」列表（大 PDF 可能要几分钟）。")
+
+
+_JOB_ICON = {"queued": "⏳ 排队", "processing": "⚙️ 处理中", "done": "✅ 完成", "failed": "❌ 失败"}
+
+
+def _jobs_html():
+    from src import ingest_queue
+    jobs = ingest_queue.recent_jobs()
+    if not jobs:
+        return ""
+    rows = "".join(
+        f'<div class="nk-doc-row"><span class="nk-doc-title">{_html.escape(j["name"])}</span>'
+        f'<span class="nk-doc-meta">{_JOB_ICON.get(j["status"], j["status"])}</span></div>'
+        for j in jobs
+    )
+    act = ingest_queue.active_count()
+    head = f'<div class="nk-sec">上传任务（{act} 个进行中）</div>' if act else '<div class="nk-sec">上传任务</div>'
+    return head + f'<div class="nk-view" style="margin:0;">{rows}</div>'
+
+
+def _tick_jobs():
+    """定时轮询：刷新任务面板；有任务刚完成则同时刷新文档表。"""
+    from src import ingest_queue
+    html = _jobs_html()
+    if ingest_queue.take_dirty():
+        return html, do_get_kb_docs()
+    return html, gr.update()
 
 
 def do_error_lookup(code, request: gr.Request = None):
@@ -516,6 +531,8 @@ with gr.Blocks(title="Nikon Expert") as demo:
                            file_types=[".pdf", ".md"], type="filepath")
         kb_upload_btn = gr.Button("上传并向量化", variant="primary")
         ingest_status = gr.Markdown("")
+        jobs_html = gr.HTML("")
+        jobs_timer = gr.Timer(3)   # 后台任务进度轮询
 
         gr.HTML('<div class="nk-sec">导入 OKF 知识库</div>')
         with gr.Row():
@@ -582,7 +599,8 @@ with gr.Blocks(title="Nikon Expert") as demo:
     provider_dropdown.change(do_switch_provider, [provider_dropdown], [model_dropdown, switch_status])
     switch_btn.click(do_apply_model, [provider_dropdown, model_dropdown], [switch_status])
 
-    kb_upload_btn.click(do_ingest_files, [kb_files], [ingest_status, kb_table])
+    kb_upload_btn.click(do_ingest_files, [kb_files], [ingest_status])
+    jobs_timer.tick(_tick_jobs, None, [jobs_html, kb_table])
     okf_import_btn.click(do_okf_import, [okf_dir_input], [okf_status_md])
     fts_index_btn.click(do_fts_index, [fts_dir_input, fts_pattern], [fts_status_md])
     fts_clear_btn.click(do_fts_clear, None, [fts_status_md])
