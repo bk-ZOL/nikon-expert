@@ -315,6 +315,14 @@ def ingest_dispatch(local_path: Path, doc_type: str):
                         doc_type=doc_type)
     else:
         print(f"    ⏭  不支持的格式，只镜像不摄入: {local_path.name}")
+        return
+
+    # 摄入成功 → 自动定级 + 写 Qdrant ACL payload（同步进来的新文档即时纳入权限）
+    try:
+        from src.acl_classify import apply_doc_acl
+        apply_doc_acl(local_path.name)
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────

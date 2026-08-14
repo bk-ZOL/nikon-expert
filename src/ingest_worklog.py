@@ -75,5 +75,13 @@ def ingest_worklog_days(days, doc_name, doc_id, wiki_node="", last_edited="",
 
     if own:
         client.close()
+
+    # 自动定级 + 写 Qdrant ACL payload（工作日志→internal L3，日志即时可查/受权限）
+    try:
+        from src.acl_classify import apply_doc_acl
+        apply_doc_acl(doc_name)
+    except Exception:
+        pass
+
     print(f"  ✅ 摄入完成，共 {len(nodes)} 个 Chunk（{len(docs)} 天）")
     return len(nodes)
