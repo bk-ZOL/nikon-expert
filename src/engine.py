@@ -187,11 +187,20 @@ def ingest_file(file_path: str) -> dict:
         pass
 
     if suffix == ".md":
-        return _ingest_md_file(eng, path, rid, doc_name)
+        result = _ingest_md_file(eng, path, rid, doc_name)
     elif suffix == ".pdf":
-        return _ingest_pdf_file(eng, path, rid, doc_name)
+        result = _ingest_pdf_file(eng, path, rid, doc_name)
     else:
         return {"success": False, "message": f"不支持的格式：{suffix}，仅支持 PDF / MD"}
+
+    # 摄入成功 → 自动定级 + 写 Qdrant ACL payload（新文档即时可查，或按密级正确隐身）
+    if isinstance(result, dict) and (result.get("success") or result.get("chunks")):
+        try:
+            from src.acl_classify import apply_doc_acl
+            apply_doc_acl(doc_name)
+        except Exception:
+            pass
+    return result
 
 
 def _ingest_md_file(eng, path: Path, rid: str, doc_name: str) -> dict:
