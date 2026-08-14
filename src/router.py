@@ -8,8 +8,11 @@ from typing import Optional
 
 
 # ── Nikon 常见 Error Code 模式 ──────────────────────────────────
+# 注意：S 前缀单列——机型简写 S207/S307/S630 是「S+3位数字」，不能当错误码，
+# 否则任何提到机型的问题都会被误判为 troubleshoot→走慢速多步 agent。
+# 真 S 错误码要么带横杠(S-1234)要么 4-5 位数字(S12345)，均不与 3 位机型号冲突。
 ERROR_CODE_RE = re.compile(
-    r'\b([EWCS]-?\d{3,5}|P-\d{4,6}|ALM-\d{2,4}|SYS-\d{2,4})\b',
+    r'\b([EWC]-?\d{3,5}|S-\d{3,5}|S\d{4,5}|P-\d{4,6}|ALM-\d{2,4}|SYS-\d{2,4})\b',
     re.IGNORECASE,
 )
 
@@ -159,27 +162,61 @@ def auto_mode(question: str) -> str:
     return "qa"
 
 
-def should_use_agent(question: str, mode: Optional[str] = None) -> bool:
-    """判断该走多步 Agent 排障，还是走单次 RAG 快路径。
+_INTENT_PROMPT = """你是光刻机知识库的查询分流器。判断工程师的这个问题属于哪一类，只回一个英文单词，不要解释：
 
-    Agent 慢但会自主多步取证，适合故障排查 / 复合问题；
-    简单概念/事实查询走快路径即可。可用环境变量覆盖：
-      AGENT_ENABLED=false  → 一律走快路径（关闭 agent）
-      AGENT_ALWAYS=true    → 一律走 agent（调试用）
+- lookup：查一个事实/参数/规格/定义/名称，一步检索就能答（如"S207 高度是多少""GOCS 是什么""传送是不是 SMIF""某参数标准值"）。
+- troubleshoot：描述了故障/报警/异常/失败现象，需要多步推理排查（如"报 E-5301 怎么办""对准精度不达标""WL 传送失败""某动作卡住"），或需要跨多份资料综合的复合问题。
+
+问题：{q}
+
+答（只回 lookup 或 troubleshoot）："""
+
+
+def _semantic_use_agent(question: str) -> Optional[bool]:
+    """用 LLM 语义判断是否该走多步 agent。返回 True/False；不可用则 None（交给兜底）。"""
+    try:
+        from llama_index.core import Settings
+        if Settings.llm is None:
+            return None
+        resp = str(Settings.llm.complete(_INTENT_PROMPT.format(q=question[:300]))).strip().lower()
+        if "troubleshoot" in resp or "排查" in resp:
+            return True
+        if "lookup" in resp or "查" in resp:
+            return False
+        return None
+    except Exception:
+        return None
+
+
+def _keyword_use_agent(question: str, mode: Optional[str] = None) -> bool:
+    """关键词/规则兜底（语义不可用时）。"""
+    m = mode or auto_mode(question)
+    if m == "troubleshoot":
+        return True
+    if (question.count("？") + question.count("?")) >= 2:
+        return True
+    return False
+
+
+def should_use_agent(question: str, mode: Optional[str] = None) -> bool:
+    """判断走多步 Agent 排障还是单次 RAG 快路径。
+
+    默认**语义路由**（LLM 按应用场景判断，避免关键词误判——如机型号 S207 被当错误码）；
+    语义不可用时回退关键词规则。环境变量：
+      AGENT_ENABLED=false  → 一律快路径（关闭 agent）
+      AGENT_ALWAYS=true    → 一律 agent（调试用）
+      AGENT_ROUTER=keyword → 强制用关键词规则（不调 LLM，省一次调用）
     """
     if os.getenv("AGENT_ENABLED", "true").lower() in ("0", "false", "no"):
         return False
     if os.getenv("AGENT_ALWAYS", "false").lower() in ("1", "true", "yes"):
         return True
 
-    m = mode or auto_mode(question)
-    # 故障排查类：多步取证收益最大
-    if m == "troubleshoot":
-        return True
-    # 复合问题（多个子问句）：需要跨资料综合
-    if (question.count("？") + question.count("?")) >= 2:
-        return True
-    return False
+    if os.getenv("AGENT_ROUTER", "semantic").lower() != "keyword":
+        sem = _semantic_use_agent(question)
+        if sem is not None:
+            return sem
+    return _keyword_use_agent(question, mode)
 
 
 def extract_error_codes(question: str) -> list:
