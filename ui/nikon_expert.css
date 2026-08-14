@@ -1,0 +1,371 @@
+/* ============================================================
+   Nikon Expert — custom.css  (Claude 风格)
+   一栏居中 · 暖纸感 · 正文衬线 · 输入框精修 · 来源/工具低调化 · 深色 · 响应式
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&display=swap');
+
+:root {
+  --nk-bg:        #FAF9F5;   /* 暖纸感底 */
+  --nk-surface:   #FFFFFF;
+  --nk-panel:     #F0EEE6;   /* 用户气泡/浅面 */
+  --nk-ink:       #2B2B26;   /* 暖近黑 */
+  --nk-ink-soft:  #84806F;
+  --nk-ink-faint: #B0AB9C;
+  --nk-line:      #E8E5DC;   /* 暖发丝线 */
+  --nk-clay:      #CC785C;   /* 陶土点缀 */
+  --nk-clay-deep: #B8634A;
+  --nk-serif: "Source Serif 4", Georgia, "Songti SC", serif;
+  --nk-mono:  "JetBrains Mono", ui-monospace, monospace;
+  --nk-col: 740px;           /* 阅读栏宽 */
+}
+.dark {
+  --nk-bg:        #262624;
+  --nk-surface:   #30302E;
+  --nk-panel:     #35332C;
+  --nk-ink:       #F0EEE6;
+  --nk-ink-soft:  #B0AB9C;
+  --nk-ink-faint: #84806F;
+  --nk-line:      #3D3D38;
+  --nk-clay:      #D69B7F;
+  --nk-clay-deep: #E0AC93;
+}
+
+/* 一栏居中,像 Claude 的阅读区 */
+.gradio-container { max-width: 860px !important; margin: 0 auto !important; background: var(--nk-bg); }
+footer { display: none !important; }
+
+/* ── 顶栏:极简,不加框 ──────────────────────────────────── */
+#nk-topbar {
+  display: flex; align-items: center; gap: 11px;
+  padding: 18px 6px 10px; margin-bottom: 8px;
+}
+#nk-topbar .nk-mark {
+  width: 26px; height: 26px; flex: 0 0 26px; position: relative;
+  border: 1.25px solid var(--nk-ink); border-radius: 50%;
+}
+#nk-topbar .nk-mark::before, #nk-topbar .nk-mark::after {
+  content: ""; position: absolute; background: var(--nk-clay);
+}
+#nk-topbar .nk-mark::before { left: 50%; top: 3px; bottom: 3px; width: 1.25px; transform: translateX(-50%); }
+#nk-topbar .nk-mark::after  { top: 50%; left: 3px; right: 3px; height: 1.25px; transform: translateY(-50%); }
+#nk-topbar .nk-name { font-weight: 600; font-size: .98rem; color: var(--nk-ink); letter-spacing: .01em; white-space: nowrap; }
+#nk-topbar .nk-status {
+  margin-left: auto; font-family: var(--nk-mono); font-size: .68rem; color: var(--nk-ink-faint);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+#nk-topbar .nk-status .dot { width: 6px; height: 6px; border-radius: 50%; background: #6FAE8E; }
+
+/* ── 对话区:居中一栏 ───────────────────────────────────── */
+.chatbot, .bubble-wrap { background: transparent !important; border: none !important; }
+.chatbot .message-wrap, .chatbot .bubble-wrap {
+  max-width: var(--nk-col) !important; margin: 0 auto !important;
+}
+
+/* 用户消息:暖灰圆角气泡,右对齐 */
+.message.user, .message-row.user-row .message {
+  background: var(--nk-panel) !important;
+  border: none !important; border-radius: 18px !important;
+  padding: 11px 16px !important;
+  font-size: .95rem !important; line-height: 1.6 !important;
+  color: var(--nk-ink) !important;
+}
+
+/* AI 消息:无气泡,衬线正文,直接落在纸上 */
+.message.bot, .message-row.bot-row .message {
+  background: transparent !important; border: none !important; box-shadow: none !important;
+  padding: 4px 2px 8px !important;
+  font-family: var(--nk-serif) !important;
+  font-size: 1.06rem !important; line-height: 1.72 !important;
+  color: var(--nk-ink) !important;
+}
+.message.bot p { margin: 0 0 .7em !important; }
+
+/* 错误码 / 图号:等宽,陶土点缀 */
+.message code, .message .md code {
+  font-family: var(--nk-mono) !important; font-size: .84em !important;
+  background: var(--nk-clay); color: #fff !important;
+  padding: 1px 6px; border-radius: 5px; font-weight: 500;
+}
+.dark .message code { color: #2B2B26 !important; }
+
+/* ── 输入条:大圆角 + 软阴影,Claude 那味 ──────────────── */
+#nk-inputrow {
+  max-width: var(--nk-col); margin: 6px auto 4px !important;
+  background: var(--nk-surface);
+  border: 1px solid var(--nk-line); border-radius: 24px;
+  padding: 6px 6px 6px 8px;
+  box-shadow: 0 2px 14px rgba(43,43,38,.05);
+  display: flex; align-items: flex-end; gap: 6px;
+  transition: box-shadow .18s ease, border-color .18s ease;
+}
+#nk-inputrow:focus-within { border-color: var(--nk-ink-faint); box-shadow: 0 4px 20px rgba(43,43,38,.08); }
+#nk-inputrow textarea, #nk-inputrow input {
+  background: transparent !important; border: none !important; box-shadow: none !important;
+  font-size: .98rem !important; padding: 9px 8px !important; resize: none;
+}
+#nk-inputrow textarea:focus { box-shadow: none !important; }
+/* 发送键:陶土色小圆钮 */
+#nk-send button, #nk-send {
+  min-width: 38px !important; width: 38px; height: 38px; border-radius: 50% !important;
+  padding: 0 !important; font-size: 1rem !important; line-height: 1;
+}
+
+/* ── 工具:输入条下方一排低调 pill,不是仪表盘 ─────────── */
+.nk-tools { max-width: var(--nk-col); margin: 10px auto 2px; display: flex; flex-wrap: wrap; gap: 7px; }
+.nk-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 999px;
+  border: 1px solid var(--nk-line); background: var(--nk-surface);
+  font-size: .76rem; color: var(--nk-ink-soft); cursor: pointer;
+  transition: all .15s ease;
+}
+.nk-pill:hover { border-color: var(--nk-clay); color: var(--nk-ink); }
+.nk-pill code { font-family: var(--nk-mono); font-size: .92em; color: var(--nk-ink-faint); }
+
+/* ── 来源:发丝线分隔的小行,不套框 ─────────────────────── */
+.nk-sources { max-width: var(--nk-col); margin: 6px auto 14px; padding-top: 10px; border-top: 1px solid var(--nk-line); }
+.nk-sources .nk-src-head {
+  font-size: .68rem; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--nk-ink-faint); margin-bottom: 8px; font-weight: 600;
+}
+.nk-src-row {
+  display: flex; align-items: baseline; gap: 10px; padding: 6px 0;
+  border-bottom: 1px solid var(--nk-line);
+}
+.nk-src-row:last-child { border-bottom: none; }
+.nk-src-idx { font-family: var(--nk-mono); font-size: .74rem; color: var(--nk-clay); font-weight: 600; flex: 0 0 auto; }
+.nk-src-title { font-size: .84rem; color: var(--nk-ink); flex: 1; min-width: 0; }
+.nk-src-loc { font-family: var(--nk-mono); font-size: .72rem; color: var(--nk-ink-soft); white-space: nowrap; }
+
+/* ── 加载:极简一行 ─────────────────────────────────────── */
+.nk-thinking { max-width: var(--nk-col); margin: 2px auto; font-family: var(--nk-serif); font-style: italic;
+  color: var(--nk-ink-soft); font-size: 1rem; }
+.nk-thinking::after { content: "…"; animation: nk-dots 1.4s steps(4) infinite; }
+@keyframes nk-dots { 0% { content: ""; } 25% { content: "·"; } 50% { content: "··"; } 75% { content: "···"; } }
+
+/* ── 焦点可见 ───────────────────────────────────────────── */
+:focus-visible { outline: 2px solid var(--nk-clay) !important; outline-offset: 2px; border-radius: 4px; }
+
+/* ── 手机 ───────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .gradio-container { padding: 6px 10px !important; }
+  #nk-topbar { padding: 12px 2px 8px; }
+  .message.bot { font-size: 1.02rem !important; }
+  #nk-inputrow { border-radius: 20px; }
+  .nk-tools { gap: 6px; }
+  .nk-pill { font-size: .74rem; padding: 5px 10px; }
+  .nk-src-loc { display: none; }   /* 手机上省掉定位串,标题优先 */
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+
+/* ============================================================
+   侧边导航栏 + 账户卡片(Claude 骨架)
+   ============================================================ */
+#nk-side-wrap, .sidebar#nk-side-wrap {
+  background: var(--nk-bg) !important;
+  border-right: 1px solid var(--nk-line) !important;
+  padding: 0 !important;
+}
+#nk-side {
+  display: flex; flex-direction: column; height: 100%;
+  padding: 14px 12px; gap: 4px; box-sizing: border-box;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+/* 顶部品牌 */
+#nk-side .nk-side-top { display: flex; align-items: center; gap: 10px; padding: 4px 8px 12px; }
+/* 品牌 logo(NE 毛笔字标,SVG 内嵌) */
+#nk-side .nk-logo { width: 26px; height: 26px; flex: 0 0 26px; display: block; }
+#nk-side .nk-name { font-weight: 600; font-size: .95rem; color: var(--nk-ink); white-space: nowrap; }
+
+/* 新建对话 */
+#nk-side .nk-new {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 9px 11px; margin-bottom: 8px; border-radius: 10px;
+  background: var(--nk-surface); border: 1px solid var(--nk-line);
+  color: var(--nk-ink); font-size: .86rem; font-weight: 500; cursor: pointer;
+  transition: all .14s ease;
+}
+#nk-side .nk-new:hover { border-color: var(--nk-clay); }
+#nk-side .nk-new svg { width: 16px; height: 16px; color: var(--nk-clay); }
+
+/* 导航项 */
+#nk-side .nk-nav { display: flex; flex-direction: column; gap: 1px; }
+#nk-side .nk-nav-item {
+  display: flex; align-items: center; gap: 11px;
+  padding: 8px 11px; border-radius: 9px; cursor: pointer;
+  color: var(--nk-ink-soft); font-size: .86rem; text-decoration: none;
+  transition: background .12s ease, color .12s ease;
+}
+#nk-side .nk-nav-item svg { width: 17px; height: 17px; flex: 0 0 17px; }
+#nk-side .nk-nav-item:hover { background: rgba(0,0,0,.04); color: var(--nk-ink); }
+.dark #nk-side .nk-nav-item:hover { background: rgba(255,255,255,.05); }
+#nk-side .nk-nav-item.active { color: var(--nk-clay); background: var(--nk-clay-soft, rgba(204,120,92,.1)); font-weight: 500; }
+
+/* 最近 */
+#nk-side .nk-recent { margin-top: 14px; display: flex; flex-direction: column; gap: 1px; min-height: 0; }
+#nk-side .nk-recent-head {
+  font-size: .64rem; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--nk-ink-faint); padding: 4px 11px 6px; font-weight: 600;
+}
+#nk-side .nk-recent-item {
+  padding: 7px 11px; border-radius: 8px; cursor: pointer;
+  color: var(--nk-ink-soft); font-size: .82rem; text-decoration: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: background .12s ease;
+}
+#nk-side .nk-recent-item:hover { background: rgba(0,0,0,.04); color: var(--nk-ink); }
+.dark #nk-side .nk-recent-item:hover { background: rgba(255,255,255,.05); }
+
+/* 账户卡片 —— 钉在底部 */
+#nk-side .nk-account {
+  margin-top: auto; display: flex; align-items: center; gap: 10px;
+  padding: 9px 8px; border-radius: 11px; cursor: pointer;
+  border-top: 1px solid var(--nk-line);
+  transition: background .12s ease;
+}
+#nk-side .nk-account:hover { background: rgba(0,0,0,.04); }
+.dark #nk-side .nk-account:hover { background: rgba(255,255,255,.05); }
+#nk-side .nk-avatar {
+  width: 30px; height: 30px; flex: 0 0 30px; border-radius: 50%;
+  background: var(--nk-clay); color: #fff; font-weight: 600; font-size: .82rem;
+  display: flex; align-items: center; justify-content: center;
+}
+#nk-side .nk-acc-info { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+#nk-side .nk-acc-name { font-size: .84rem; font-weight: 600; color: var(--nk-ink); }
+#nk-side .nk-acc-role { font-size: .72rem; color: var(--nk-ink-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#nk-side .nk-acc-more { margin-left: auto; color: var(--nk-ink-faint); font-size: 1.1rem; line-height: 1; }
+
+/* ============================================================
+   v3:侧栏折叠态 + 导航按钮化 + 多视图
+   ============================================================ */
+
+/* 折叠按钮(预览页用;Gradio 的 Sidebar 自带,这个不影响) */
+#nk-side .nk-collapse {
+  margin-left: auto; width: 26px; height: 26px; flex: 0 0 26px;
+  border: none; background: transparent; border-radius: 7px; cursor: pointer;
+  color: var(--nk-ink-faint); display: flex; align-items: center; justify-content: center;
+}
+#nk-side .nk-collapse:hover { background: rgba(0,0,0,.05); color: var(--nk-ink); }
+.dark #nk-side .nk-collapse:hover { background: rgba(255,255,255,.06); }
+#nk-side .nk-collapse svg { width: 16px; height: 16px; }
+
+/* 预览页:折叠成窄条,只剩图标 */
+.side { transition: width .22s ease, flex-basis .22s ease; overflow: hidden; }
+.shell.collapsed .side { width: 64px; flex-basis: 64px; }
+.shell.collapsed #nk-side { padding: 14px 10px; }
+.shell.collapsed .nk-name, .shell.collapsed .nk-new span,
+.shell.collapsed .nk-nav-item span,
+.shell.collapsed #nk-side .nk-recent,
+.shell.collapsed #nk-side .nk-acc-info,
+.shell.collapsed #nk-side .nk-acc-more { display: none; }
+.shell.collapsed .nk-new { justify-content: center; padding: 9px; }
+.shell.collapsed .nk-nav-item { justify-content: center; padding: 9px; }
+.shell.collapsed .nk-account { justify-content: center; padding: 8px 4px; }
+.shell.collapsed .nk-side-top { justify-content: center; padding: 4px 0 12px; }
+.shell.collapsed .nk-collapse { margin-left: 0; position: absolute; }
+.shell.collapsed .nk-side-top .nk-logo { display: none; }
+
+/* Gradio:导航用 gr.Button,套成导航项的样子 */
+#nk-side-wrap button.nk-navbtn {
+  display: flex !important; align-items: center; justify-content: flex-start !important;
+  gap: 11px; width: 100%; padding: 8px 11px !important; border-radius: 9px !important;
+  background: transparent !important; border: none !important; box-shadow: none !important;
+  color: var(--nk-ink-soft) !important; font-size: .86rem !important; font-weight: 400 !important;
+  transition: background .12s ease, color .12s ease; min-width: 0 !important;
+}
+#nk-side-wrap button.nk-navbtn:hover { background: rgba(0,0,0,.04) !important; color: var(--nk-ink) !important; }
+.dark #nk-side-wrap button.nk-navbtn:hover { background: rgba(255,255,255,.05) !important; }
+#nk-side-wrap button.nk-navbtn-active {
+  color: var(--nk-clay) !important; background: rgba(204,120,92,.1) !important; font-weight: 500 !important;
+}
+#nk-side-wrap button.nk-newbtn {
+  display: flex !important; align-items: center; gap: 9px; width: 100%;
+  padding: 9px 11px !important; margin-bottom: 8px; border-radius: 10px !important;
+  background: var(--nk-surface) !important; border: 1px solid var(--nk-line) !important;
+  color: var(--nk-ink) !important; font-size: .86rem !important; font-weight: 500 !important;
+  box-shadow: none !important;
+}
+#nk-side-wrap button.nk-newbtn:hover { border-color: var(--nk-clay) !important; }
+
+/* 视图:知识库 / 工作日志 / 错误码 */
+.nk-view { max-width: var(--nk-col); margin: 8px auto 0; }
+.nk-view h2 {
+  font-family: var(--nk-serif); font-size: 1.5rem; font-weight: 600;
+  color: var(--nk-ink); margin: 6px 0 4px;
+}
+.nk-view .nk-view-sub { font-size: .86rem; color: var(--nk-ink-soft); margin-bottom: 18px; }
+
+/* 知识库文档行 */
+.nk-doc-row {
+  display: flex; align-items: baseline; gap: 12px; padding: 12px 2px;
+  border-bottom: 1px solid var(--nk-line); cursor: pointer;
+  transition: background .12s ease;
+}
+.nk-doc-row:hover { background: rgba(0,0,0,.02); }
+.dark .nk-doc-row:hover { background: rgba(255,255,255,.03); }
+.nk-doc-title { font-size: .92rem; color: var(--nk-ink); flex: 1; min-width: 0; font-weight: 500; }
+.nk-doc-meta { font-family: var(--nk-mono); font-size: .72rem; color: var(--nk-ink-faint); white-space: nowrap; }
+.nk-doc-tag {
+  font-size: .68rem; padding: 2px 8px; border-radius: 999px;
+  background: var(--nk-panel); color: var(--nk-ink-soft); flex: 0 0 auto;
+}
+
+/* ============================================================
+   v4:知识库功能页(对齐线上真实功能:上传/OKF/索引/文档管理)
+   ============================================================ */
+#nk-kb { max-width: var(--nk-col); margin: 0 auto; }
+
+/* 分区标题:小写间隔字,同"来源"的做法 */
+.nk-sec {
+  font-size: .68rem; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--nk-ink-faint); font-weight: 600;
+  margin: 26px 0 10px; padding-top: 18px; border-top: 1px solid var(--nk-line);
+}
+.nk-sec.first { border-top: none; padding-top: 0; margin-top: 10px; }
+.nk-sec-hint { font-size: .78rem; color: var(--nk-ink-soft); margin: -4px 0 10px; line-height: 1.5; }
+.nk-sec-hint code { font-family: var(--nk-mono); font-size: .9em; background: var(--nk-panel); color: var(--nk-ink-soft); padding: 0 5px; border-radius: 4px; }
+
+/* Gradio 组件在 kb 页里的收敛 */
+#nk-kb .block { background: transparent !important; border: none !important; box-shadow: none !important; }
+#nk-kb .form { border: none !important; background: transparent !important; }
+
+/* 上传区:虚线暖框 */
+#nk-kb [data-testid="file"], #nk-kb .file-preview, #nk-kb .upload-container {
+  border: 1.5px dashed var(--nk-ink-faint) !important;
+  border-radius: 14px !important;
+  background: var(--nk-surface) !important;
+  min-height: 120px;
+}
+
+/* 表格:发丝线,path 用等宽 */
+#nk-kb table { font-size: .8rem !important; }
+#nk-kb .table-wrap, #nk-kb .dataframe {
+  border: 1px solid var(--nk-line) !important; border-radius: 10px !important;
+  background: var(--nk-surface) !important;
+}
+#nk-kb thead th, #nk-kb thead td {
+  font-family: var(--nk-mono) !important; font-size: .7rem !important;
+  color: var(--nk-ink-soft) !important; background: var(--nk-panel) !important;
+  font-weight: 600 !important;
+}
+#nk-kb tbody td { border-color: var(--nk-line) !important; color: var(--nk-ink) !important; }
+
+/* 危险操作按钮:低调红,描边式 */
+button.nk-danger {
+  background: transparent !important;
+  border: 1px solid #D8AFA6 !important;
+  color: #B8634A !important;
+  box-shadow: none !important;
+}
+button.nk-danger:hover { background: #FBF0EB !important; border-color: #B8634A !important; }
+.dark button.nk-danger { border-color: #6B453C !important; color: #E0AC93 !important; }
+.dark button.nk-danger:hover { background: #3A2A24 !important; }
+
+/* 顶栏左侧标语 */
+#nk-maintop { display: flex !important; align-items: center; justify-content: space-between !important; }
+#nk-maintop .nk-tagline { font-size: .78rem; color: var(--nk-ink-soft); }
