@@ -623,6 +623,18 @@ with gr.Blocks(title="Nikon Expert") as demo:
     err_btn.click(do_error_lookup, [err_code], [err_out])
     err_code.submit(do_error_lookup, [err_code], [err_out])
 
+    # 手机端：点侧栏导航后自动收起抽屉（gr.Sidebar 移动端是覆盖式，不收会盖住内容→看着像没反应）
+    demo.load(js="""() => {
+      function closeDrawer() {
+        if (window.innerWidth > 640) return;
+        const mt = document.querySelector('.menu-toggle-button');
+        if (mt) mt.click();
+      }
+      document.body.addEventListener('click', (e) => {
+        if (e.target.closest('.nk-navbtn, .nk-newbtn')) setTimeout(closeDrawer, 90);
+      }, true);
+    }""")
+
 
 # ── 注册 FastAPI 路由（本地模式需要 PDF 服务，远程模式由 API 服务提供） ──
 import pathlib as _pl
