@@ -405,7 +405,7 @@ def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
 
     threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.30"))
     top_k = int(os.getenv("RETRIEVAL_TOP_K", "8"))
-    rerank_top_n = int(os.getenv("RERANK_TOP_N", "4"))
+    rerank_top_n = int(os.getenv("RERANK_TOP_N", "6"))
     eng = _init_engine()
 
     # ── 1. 查询分类
@@ -449,11 +449,59 @@ def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
     except Exception:
         pass
 
-    # ── 4. 融合（非电路类问题压制逐页电路图，避免刷屏挤掉手册答案）
-    merged = merge_results(fts_results, semantic_results, fts_w, sem_w, top_n=top_k,
-                           demote_circuit=not is_circuit_query(question))
+    # ── 4. 融合(RRF)：先取较大候选池，再交给 Rerank 精排
+    rerank_pool = int(os.getenv("RERANK_POOL", "12"))
+    pool = merge_results(fts_results, semantic_results, fts_w, sem_w, top_n=rerank_pool,
+                         demote_circuit=not is_circuit_query(question))
 
+    # ── 5. Rerank 精排：把语义蹭词但不相关的挤掉，只留最相关的 rerank_top_n 条
+    merged = _rerank(question, pool, rerank_top_n)
     return merged, qtype
+
+
+def _rerank(question: str, candidates: list, top_n: int) -> list:
+    """第三层 Rerank：对 RRF 候选池按"与问题的真实相关性"精排，取 top_n。
+
+    默认用 LLM(当前大脑)做精排——零额外模型/内存，天然跨语言(中/英/日)。
+    RERANK_ENABLED=false 关闭；失败/不可用则回退 RRF 原序。
+    （若日后要更快的本地 cross-encoder，可换 bge-reranker，但要占 ~2G 内存。）
+    """
+    import os as _os
+    if not candidates:
+        return candidates
+    if (_os.getenv("RERANK_ENABLED", "true").lower() in ("0", "false", "no")
+            or len(candidates) <= top_n):
+        return candidates[:top_n]
+    try:
+        from llama_index.core import Settings
+        if Settings.llm is None:
+            return candidates[:top_n]
+        listing = "\n".join(
+            f"[{i}] 《{c.get('doc_name', '')}》{c.get('section_title', '') or ''}："
+            f"{(c.get('text', '') or '')[:180]}"
+            for i, c in enumerate(candidates))
+        prompt = (f"下面是检索到的资料片段。挑出对回答问题最相关的，按相关性从高到低排序，"
+                  f"只输出编号（逗号分隔，最多 {top_n} 个），不要解释、不要输出别的。\n\n"
+                  f"问题：{question}\n\n候选片段：\n{listing}\n\n最相关编号：")
+        resp = str(Settings.llm.complete(prompt)).strip()
+        import re as _re
+        order, seen = [], set()
+        for x in _re.findall(r"\d+", resp):
+            i = int(x)
+            if 0 <= i < len(candidates) and i not in seen:
+                seen.add(i)
+                order.append(candidates[i])
+            if len(order) >= top_n:
+                break
+        # LLM 漏选的按 RRF 原序补齐
+        for i, c in enumerate(candidates):
+            if len(order) >= top_n:
+                break
+            if i not in seen:
+                order.append(c)
+        return order[:top_n] if order else candidates[:top_n]
+    except Exception:
+        return candidates[:top_n]
 
 
 def _retrieve_semantic(eng: dict, question: str, user, top_k: int) -> list:
