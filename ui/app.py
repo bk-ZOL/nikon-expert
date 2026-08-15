@@ -381,19 +381,62 @@ def _switch_view(target):
 
 
 def do_ingest_files(paths):
-    """多文件上传向量化 + 自动刷新文档表（修『上传后列表不显示』）。"""
+    """异步上传：文件入队即返回，后台单线程串行摄入（不阻塞界面/查询）。
+    PDF 在 CPU 上较慢也没关系——用户不用干等，任务面板显示进度，完成自动进列表。"""
+    from src import ingest_queue
     if not paths:
-        return "⚠️ 请先选择文件", do_get_kb_docs()
+        return "⚠️ 请先选择文件"
     if not isinstance(paths, list):
         paths = [paths]
-    msgs = []
+    n = 0
     for p in paths:
         fp = p if isinstance(p, str) else getattr(p, "name", None)
-        if not fp:
-            continue
-        r = backend.ingest_file(fp)
-        msgs.append(r.get("message", str(r)) if isinstance(r, dict) else str(r))
-    return ("\n".join(msgs) or "（无文件）"), do_get_kb_docs()
+        if fp:
+            ingest_queue.enqueue(fp, os.path.basename(fp))
+            n += 1
+    if not n:
+        return "⚠️ 未取到文件路径"
+    return (f"✅ 已加入队列（{n} 个），后台处理中——**不用等，可继续用**。"
+            "完成后会自动出现在下方「向量库文档管理」列表（大 PDF 可能要几分钟）。")
+
+
+_JOB_ICON = {"queued": "⏳ 排队", "processing": "⚙️ 处理中", "done": "✅ 完成", "failed": "❌ 失败"}
+
+
+def _fmt_elapsed(sec):
+    sec = int(sec)
+    return f"{sec//60}m{sec%60:02d}s" if sec >= 60 else f"{sec}s"
+
+
+def _jobs_html():
+    import time as _t
+    from src import ingest_queue
+    jobs = ingest_queue.recent_jobs()
+    if not jobs:
+        return ""
+    rows = []
+    for j in jobs:
+        label = _JOB_ICON.get(j["status"], j["status"])
+        if j["status"] == "processing" and j.get("ts_start"):
+            label = f'⚙️ 处理中 · 已 {_fmt_elapsed(_t.time() - j["ts_start"])}'
+        elif j["status"] == "failed" and j.get("message"):
+            label = f'❌ 失败：{_html.escape(j["message"][:40])}'
+        rows.append(
+            f'<div class="nk-doc-row"><span class="nk-doc-title">{_html.escape(j["name"])}</span>'
+            f'<span class="nk-doc-meta">{label}</span></div>')
+    act = ingest_queue.active_count()
+    head = (f'<div class="nk-sec">上传任务（{act} 个进行中 · CPU 嵌向量，大文件数分钟属正常）</div>'
+            if act else '<div class="nk-sec">上传任务</div>')
+    return head + f'<div class="nk-view" style="margin:0;">{"".join(rows)}</div>'
+
+
+def _tick_jobs():
+    """定时轮询：刷新任务面板；有任务刚完成则同时刷新文档表。"""
+    from src import ingest_queue
+    html = _jobs_html()
+    if ingest_queue.take_dirty():
+        return html, do_get_kb_docs()
+    return html, gr.update()
 
 
 def do_error_lookup(code, request: gr.Request = None):
@@ -500,6 +543,8 @@ with gr.Blocks(title="Nikon Expert") as demo:
                            file_types=[".pdf", ".md"], type="filepath")
         kb_upload_btn = gr.Button("上传并向量化", variant="primary")
         ingest_status = gr.Markdown("")
+        jobs_html = gr.HTML("")
+        jobs_timer = gr.Timer(3)   # 后台任务进度轮询
 
         gr.HTML('<div class="nk-sec">导入 OKF 知识库</div>')
         with gr.Row():
@@ -566,7 +611,8 @@ with gr.Blocks(title="Nikon Expert") as demo:
     provider_dropdown.change(do_switch_provider, [provider_dropdown], [model_dropdown, switch_status])
     switch_btn.click(do_apply_model, [provider_dropdown, model_dropdown], [switch_status])
 
-    kb_upload_btn.click(do_ingest_files, [kb_files], [ingest_status, kb_table])
+    kb_upload_btn.click(do_ingest_files, [kb_files], [ingest_status])
+    jobs_timer.tick(_tick_jobs, None, [jobs_html, kb_table])
     okf_import_btn.click(do_okf_import, [okf_dir_input], [okf_status_md])
     fts_index_btn.click(do_fts_index, [fts_dir_input, fts_pattern], [fts_status_md])
     fts_clear_btn.click(do_fts_clear, None, [fts_status_md])
@@ -576,6 +622,18 @@ with gr.Blocks(title="Nikon Expert") as demo:
     wl_btn.click(do_worklog_recent, [wl_days], [wl_out])
     err_btn.click(do_error_lookup, [err_code], [err_out])
     err_code.submit(do_error_lookup, [err_code], [err_out])
+
+    # 手机端：点侧栏导航后自动收起抽屉（gr.Sidebar 移动端是覆盖式，不收会盖住内容→看着像没反应）
+    demo.load(js="""() => {
+      function closeDrawer() {
+        if (window.innerWidth > 640) return;
+        const mt = document.querySelector('.menu-toggle-button');
+        if (mt) mt.click();
+      }
+      document.body.addEventListener('click', (e) => {
+        if (e.target.closest('.nk-navbtn, .nk-newbtn')) setTimeout(closeDrawer, 90);
+      }, true);
+    }""")
 
 
 # ── 注册 FastAPI 路由（本地模式需要 PDF 服务，远程模式由 API 服务提供） ──
