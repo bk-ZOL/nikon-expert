@@ -323,6 +323,35 @@ from nikon_theme import nikon_theme
 _UI_DIR = _Path(__file__).parent
 _NK_CSS = (_UI_DIR / "nikon_expert.css").read_text(encoding="utf-8")
 _FAVICON = str(_UI_DIR / "ne_kaushan.svg")
+
+# 答案内 Markdown 表格美化（【参数速查】【按机型区分】等）——配主题陶土色
+_TABLE_CSS = """
+.message.bot table, .message-row.bot-row .message table {
+  width:100%; border-collapse:separate !important; border-spacing:0 !important;
+  margin:.85em 0 !important; font-size:.88rem !important;
+  border:1px solid var(--nk-line) !important; border-radius:10px !important;
+  overflow:hidden !important; background:var(--nk-surface) !important;
+  box-shadow:0 1px 3px rgba(43,43,38,.05);
+}
+.message.bot thead th, .message-row.bot-row thead th {
+  background:var(--nk-clay-soft) !important; color:var(--nk-ink) !important;
+  font-weight:600 !important; text-align:left !important; padding:9px 14px !important;
+  border:none !important; border-bottom:1px solid var(--nk-line) !important;
+  white-space:nowrap; letter-spacing:.01em;
+}
+.message.bot tbody td, .message-row.bot-row tbody td {
+  padding:8px 14px !important; border:none !important;
+  border-bottom:1px solid var(--nk-line) !important;
+  color:var(--nk-ink) !important; vertical-align:top; line-height:1.55;
+}
+.message.bot tbody tr:last-child td { border-bottom:none !important; }
+.message.bot tbody tr:nth-child(even) td { background:rgba(120,80,60,.035) !important; }
+.dark .message.bot tbody tr:nth-child(even) td { background:rgba(255,255,255,.035) !important; }
+.message.bot tbody tr:hover td { background:var(--nk-clay-soft) !important; }
+.message.bot table code { font-family:var(--nk-mono) !important; font-size:.82rem !important; }
+@media (max-width:640px){ .message.bot table { font-size:.8rem !important; }
+  .message.bot thead th, .message.bot tbody td { padding:6px 9px !important; } }
+"""
 _LOGO_SVG = (_UI_DIR / "ne_kaushan.svg").read_text(encoding="utf-8").replace(
     'width="64" height="64"', 'class="nk-logo" width="26" height="26"')
 
@@ -736,7 +765,8 @@ if __name__ == "__main__":
 
     launch_kwargs = {"server_name": host, "server_port": port, "share": False,
                      "prevent_thread_lock": True, "theme": nikon_theme,
-                     "css": _NK_CSS + "\n" + CITATION_CSS, "favicon_path": _FAVICON}
+                     "css": _NK_CSS + "\n" + _TABLE_CSS + "\n" + CITATION_CSS,
+                     "favicon_path": _FAVICON}
     # 登录：security 开启 → 逐人校验 users 表(per-user 身份，驱动 ACL)；
     #       否则回退单一共享账号 GRADIO_AUTH(向后兼容)。
     from src import acl
