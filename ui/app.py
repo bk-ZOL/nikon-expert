@@ -323,6 +323,27 @@ from nikon_theme import nikon_theme
 _UI_DIR = _Path(__file__).parent
 _NK_CSS = (_UI_DIR / "nikon_expert.css").read_text(encoding="utf-8")
 _FAVICON = str(_UI_DIR / "ne_kaushan.svg")
+
+# 侧栏图标栏折叠（Claude 风格：窄时只剩图标、隐藏文字）
+_RAIL_CSS = """
+.nk-railtoggle { font-size:.72rem !important; opacity:.6; padding:2px 8px !important;
+  min-height:24px !important; margin:0 0 4px auto !important; width:auto !important; }
+#nk-side-wrap.nk-rail { width:60px !important; min-width:60px !important; }
+#nk-side-wrap.nk-rail .nk-name,
+#nk-side-wrap.nk-rail .nk-recent,
+#nk-side-wrap.nk-rail .nk-acc-info,
+#nk-side-wrap.nk-rail .nk-acc-more { display:none !important; }
+#nk-side-wrap.nk-rail .nk-side-top { justify-content:center; }
+#nk-side-wrap.nk-rail .nk-account { justify-content:center; padding:0 !important; }
+#nk-side-wrap.nk-rail button.nk-navbtn,
+#nk-side-wrap.nk-rail button.nk-newbtn {
+  width:40px !important; min-width:40px !important; overflow:hidden !important;
+  white-space:nowrap !important; text-align:left !important;
+  padding-left:11px !important; padding-right:0 !important; }
+#nk-side-wrap.nk-rail .nk-railtoggle { margin:0 auto 4px !important; font-size:0 !important;
+  padding:2px 6px !important; }
+#nk-side-wrap.nk-rail .nk-railtoggle::before { content:'》'; font-size:.8rem; opacity:.6; }
+"""
 _LOGO_SVG = (_UI_DIR / "ne_kaushan.svg").read_text(encoding="utf-8").replace(
     'width="64" height="64"', 'class="nk-logo" width="26" height="26"')
 
@@ -503,6 +524,7 @@ def do_worklog_recent(days):
 with gr.Blocks(title="Nikon Expert") as demo:
     with gr.Sidebar(elem_id="nk-side-wrap", width=280, open=True):
         gr.HTML(_SIDE_TOP)
+        rail_btn = gr.Button("《 收起", elem_id="nk-rail-btn", elem_classes=["nk-railtoggle"])
         new_btn  = gr.Button("＋ 新建对话", elem_classes=["nk-newbtn"])
         nav_chat = gr.Button("💬 对话", elem_classes=["nk-navbtn", "nk-navbtn-active"])
         nav_kb   = gr.Button("📖 知识库", elem_classes=["nk-navbtn"])
@@ -623,8 +645,22 @@ with gr.Blocks(title="Nikon Expert") as demo:
     err_btn.click(do_error_lookup, [err_code], [err_out])
     err_code.submit(do_error_lookup, [err_code], [err_out])
 
-    # 手机端：点侧栏导航后自动收起抽屉（gr.Sidebar 移动端是覆盖式，不收会盖住内容→看着像没反应）
+    # 侧栏折叠成图标栏（Claude 风格）：点「收起」切 nk-rail 类，localStorage 记忆
+    rail_btn.click(fn=None, js="""() => {
+      const sb = document.querySelector('#nk-side-wrap');
+      if (!sb) return;
+      sb.classList.toggle('nk-rail');
+      try { localStorage.setItem('nk_rail', sb.classList.contains('nk-rail') ? '1' : '0'); } catch(e){}
+    }""")
+
+    # 页面加载：① 恢复折叠状态 ② 手机点导航后自动收起抽屉
     demo.load(js="""() => {
+      try {
+        if (localStorage.getItem('nk_rail') === '1') {
+          const sb = document.querySelector('#nk-side-wrap');
+          if (sb) sb.classList.add('nk-rail');
+        }
+      } catch(e){}
       function closeDrawer() {
         if (window.innerWidth > 640) return;
         const mt = document.querySelector('.menu-toggle-button');
@@ -733,7 +769,8 @@ if __name__ == "__main__":
 
     launch_kwargs = {"server_name": host, "server_port": port, "share": False,
                      "prevent_thread_lock": True, "theme": nikon_theme,
-                     "css": _NK_CSS + "\n" + CITATION_CSS, "favicon_path": _FAVICON}
+                     "css": _NK_CSS + "\n" + _RAIL_CSS + "\n" + CITATION_CSS,
+                     "favicon_path": _FAVICON}
     # 登录：security 开启 → 逐人校验 users 表(per-user 身份，驱动 ACL)；
     #       否则回退单一共享账号 GRADIO_AUTH(向后兼容)。
     from src import acl
