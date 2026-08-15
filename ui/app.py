@@ -403,19 +403,31 @@ def do_ingest_files(paths):
 _JOB_ICON = {"queued": "⏳ 排队", "processing": "⚙️ 处理中", "done": "✅ 完成", "failed": "❌ 失败"}
 
 
+def _fmt_elapsed(sec):
+    sec = int(sec)
+    return f"{sec//60}m{sec%60:02d}s" if sec >= 60 else f"{sec}s"
+
+
 def _jobs_html():
+    import time as _t
     from src import ingest_queue
     jobs = ingest_queue.recent_jobs()
     if not jobs:
         return ""
-    rows = "".join(
-        f'<div class="nk-doc-row"><span class="nk-doc-title">{_html.escape(j["name"])}</span>'
-        f'<span class="nk-doc-meta">{_JOB_ICON.get(j["status"], j["status"])}</span></div>'
-        for j in jobs
-    )
+    rows = []
+    for j in jobs:
+        label = _JOB_ICON.get(j["status"], j["status"])
+        if j["status"] == "processing" and j.get("ts_start"):
+            label = f'⚙️ 处理中 · 已 {_fmt_elapsed(_t.time() - j["ts_start"])}'
+        elif j["status"] == "failed" and j.get("message"):
+            label = f'❌ 失败：{_html.escape(j["message"][:40])}'
+        rows.append(
+            f'<div class="nk-doc-row"><span class="nk-doc-title">{_html.escape(j["name"])}</span>'
+            f'<span class="nk-doc-meta">{label}</span></div>')
     act = ingest_queue.active_count()
-    head = f'<div class="nk-sec">上传任务（{act} 个进行中）</div>' if act else '<div class="nk-sec">上传任务</div>'
-    return head + f'<div class="nk-view" style="margin:0;">{rows}</div>'
+    head = (f'<div class="nk-sec">上传任务（{act} 个进行中 · CPU 嵌向量，大文件数分钟属正常）</div>'
+            if act else '<div class="nk-sec">上传任务</div>')
+    return head + f'<div class="nk-view" style="margin:0;">{"".join(rows)}</div>'
 
 
 def _tick_jobs():

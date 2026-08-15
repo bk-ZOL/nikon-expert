@@ -18,20 +18,35 @@ _seq = [0]
 
 
 def _worker():
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    py = os.path.join(root, ".venv", "bin", "python")
+    script = os.path.join(root, "scripts", "ingest_one.py")
     while True:
         job_id, path = _q.get()
         with _lock:
             j = _jobs.get(job_id)
             if j:
                 j["status"] = "processing"
+                j["ts_start"] = time.time()
         try:
-            from src.engine import ingest_file
-            r = ingest_file(path)
-            msg = r.get("message", str(r)) if isinstance(r, dict) else str(r)
-            ok = not (isinstance(r, dict) and r.get("success") is False)
+            # 子进程跑 embedding：CPU 密集活不占 Gradio 主进程 GIL，
+            # 上传/查询/定时器全程畅通（修 embedding 把上传挤断的 ClientDisconnect）。
+            proc = subprocess.run([py, script, path], cwd=root,
+                                  capture_output=True, text=True, timeout=7200)
+            lines = [l for l in (proc.stdout or "").splitlines() if l.strip()]
+            last = lines[-1] if lines else ""
+            ok = proc.returncode == 0 and last.startswith("OK")
+            msg = last[3:].strip() if (":" in last[:5]) else last
+            if not ok and not msg:
+                msg = (proc.stderr or "")[-200:] or "摄入失败"
             with _lock:
                 if job_id in _jobs:
                     _jobs[job_id].update(status="done" if ok else "failed", message=msg)
+        except subprocess.TimeoutExpired:
+            with _lock:
+                if job_id in _jobs:
+                    _jobs[job_id].update(status="failed", message="超时（>2h），可能文件过大")
         except Exception as e:
             with _lock:
                 if job_id in _jobs:
