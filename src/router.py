@@ -257,72 +257,68 @@ def merge_results(
     demote_circuit: bool = False,
     circuit_cap: int = 2,
     circuit_penalty: float = 0.25,
+    rrf_k: int = 60,
 ) -> list:
     """
-    融合 FTS 和语义检索结果。
+    Hybrid 融合：Reciprocal Rank Fusion (RRF)。
 
-    两者结果格式各自为:
-    - FTS: [{"doc_id", "doc_name", "text", "score", ...}]
-    - Semantic: llama-index NodeWithScore objects (有 .score, .metadata, .get_content())
+    比"分数归一化加权"更稳——只看两路各自的**排名**，与 BM25/余弦分数的尺度无关，
+    不会因某一路分数量纲大而压倒另一路。RRF 贡献 = weight × 1/(rrf_k + rank)，
+    同一文档两路都命中则相加（自然加权）。rrf_k 越大，头部名次差异越平缓（标准取 60）。
 
-    返回: 合并排序后的列表，每个元素是 dict:
-    {"doc_id", "doc_name", "doc_type", "machine_model", "section_title",
-     "text", "score", "source", "file_path", "page_start", ...}
+    入参两路均已按相关性**从好到差**排好（FTS 按 bm25 ORDER BY、语义按检索器分数）。
+    返回: [{"doc_id","doc_name","doc_type","machine_model","section_title",
+            "text","score","source","file_path","page_start"}, ...]
     """
     merged = {}
 
-    # ── 归一化 FTS 分数（BM25 负值，取绝对值后归一化）
-    fts_scores = [abs(r.get("score", 0)) for r in fts_results]
-    fts_max = max(fts_scores) if fts_scores else 1.0
+    def _key(doc_id, section, page):
+        return (doc_id, section or page)
 
+    # ── FTS 路：按名次给 RRF 分（列表内去重，取最佳名次；实体多路检索可能重复）
+    seen = set()
+    rank = 0
     for r in fts_results:
-        key = (r.get("doc_id", ""), r.get("section_title", "") or r.get("page_start", ""))
-        norm_score = (abs(r.get("score", 0)) / fts_max) * fts_weight if fts_max > 0 else 0
-        entry = {
-            "doc_id": r.get("doc_id", ""),
-            "doc_name": r.get("doc_name", ""),
-            "doc_type": r.get("doc_type", ""),
-            "machine_model": r.get("machine_model", ""),
-            "section_title": r.get("section_title", ""),
-            "text": r.get("text", ""),
-            "file_path": r.get("file_path", ""),
-            "page_start": r.get("page_start", ""),
-            "source": "fts",
-        }
+        key = _key(r.get("doc_id", ""), r.get("section_title", ""), r.get("page_start", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        contrib = fts_weight * (1.0 / (rrf_k + rank))
+        rank += 1
         if key in merged:
-            merged[key]["score"] += norm_score
-            if "semantic" not in merged[key]["source"]:
-                merged[key]["source"] = "fts+semantic"
+            merged[key]["score"] += contrib
+            merged[key]["source"] = "fts+semantic"
         else:
-            entry["score"] = norm_score
-            merged[key] = entry
+            merged[key] = {
+                "doc_id": r.get("doc_id", ""), "doc_name": r.get("doc_name", ""),
+                "doc_type": r.get("doc_type", ""), "machine_model": r.get("machine_model", ""),
+                "section_title": r.get("section_title", ""), "text": r.get("text", ""),
+                "file_path": r.get("file_path", ""), "page_start": r.get("page_start", ""),
+                "source": "fts", "score": contrib,
+            }
 
-    # ── 归一化语义分数
-    sem_scores = [n.score or 0.0 for n in semantic_results]
-    sem_max = max(sem_scores) if sem_scores else 1.0
-
+    # ── 语义路：同理
+    seen = set()
+    rank = 0
     for node in semantic_results:
         m = node.metadata or {}
-        key = (m.get("doc_id", ""), m.get("section_title", "") or m.get("page_start", ""))
-        norm_score = ((node.score or 0.0) / sem_max) * semantic_weight if sem_max > 0 else 0
-        entry = {
-            "doc_id": m.get("doc_id", ""),
-            "doc_name": m.get("doc_name", ""),
-            "doc_type": m.get("doc_type", ""),
-            "machine_model": m.get("machine_model", ""),
-            "section_title": m.get("section_title", ""),
-            "text": node.get_content(),
-            "file_path": m.get("file_path", ""),
-            "page_start": m.get("page_start", ""),
-            "source": "semantic",
-        }
+        key = _key(m.get("doc_id", ""), m.get("section_title", ""), m.get("page_start", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        contrib = semantic_weight * (1.0 / (rrf_k + rank))
+        rank += 1
         if key in merged:
-            merged[key]["score"] += norm_score
-            if "fts" not in merged[key]["source"]:
-                merged[key]["source"] = "fts+semantic"
+            merged[key]["score"] += contrib
+            merged[key]["source"] = "fts+semantic"
         else:
-            entry["score"] = norm_score
-            merged[key] = entry
+            merged[key] = {
+                "doc_id": m.get("doc_id", ""), "doc_name": m.get("doc_name", ""),
+                "doc_type": m.get("doc_type", ""), "machine_model": m.get("machine_model", ""),
+                "section_title": m.get("section_title", ""), "text": node.get_content(),
+                "file_path": m.get("file_path", ""), "page_start": m.get("page_start", ""),
+                "source": "semantic", "score": contrib,
+            }
 
     # ── 非电路类问题：压制逐页电路图（否则含 laser/stage 的问题会被图纸刷屏，
     #    把只在手册里一句话的答案挤出候选集）。降权 + 硬限额双保险。
