@@ -409,10 +409,18 @@ def _switch_view(target):
     return vis + btns
 
 
-def do_ingest_files(paths):
+def do_ingest_files(paths, mode="☁️ 云端向量化"):
     """异步上传：文件入队即返回，后台单线程串行摄入（不阻塞界面/查询）。
-    PDF 在 CPU 上较慢也没关系——用户不用干等，任务面板显示进度，完成自动进列表。"""
+    PDF 在 CPU 上较慢也没关系——用户不用干等，任务面板显示进度，完成自动进列表。
+
+    mode='🖥 本地向量化' 时：云端网页调不到你 Mac 算力，引导去本机工具。"""
     from src import ingest_queue
+    if mode and "本地" in mode:
+        return ("🖥 **本地向量化用的是你 Mac 的算力，这个云端网页（服务器）调不到它。**\n\n"
+                "请在你 **Mac 上**打开本地工具：**http://127.0.0.1:7870**\n"
+                "（若没开：Mac 终端里 `cd ~/nikon-expert && .venv/bin/python scripts/local_ingest_ui.py`）\n\n"
+                "那个本机页面同样有本地/云端开关，**本地模式**会用你 Mac 快速嵌好、再自动推到这个云端库。\n\n"
+                "_想在这里直接传，就切到「☁️ 云端向量化」，服务器后台慢慢嵌（几分钟，不用等）。_")
     if not paths:
         return "⚠️ 请先选择文件"
     if not isinstance(paths, list):
@@ -570,6 +578,11 @@ with gr.Blocks(title="Nikon Expert") as demo:
         gr.HTML('<div class="nk-sec first">上传文件到向量知识库</div>')
         kb_files = gr.File(label="选择文件（PDF / Markdown）", file_count="multiple",
                            file_types=[".pdf", ".md"], type="filepath")
+        kb_mode = gr.Radio(
+            ["☁️ 云端向量化（这里传，服务器后台慢慢嵌，不用等）",
+             "🖥 本地向量化（用你 Mac 算力，快；需在 Mac 上开工具）"],
+            value="☁️ 云端向量化（这里传，服务器后台慢慢嵌，不用等）",
+            label="向量化方式")
         kb_upload_btn = gr.Button("上传并向量化", variant="primary")
         ingest_status = gr.Markdown("")
         jobs_html = gr.HTML("")
@@ -640,7 +653,7 @@ with gr.Blocks(title="Nikon Expert") as demo:
     provider_dropdown.change(do_switch_provider, [provider_dropdown], [model_dropdown, switch_status])
     switch_btn.click(do_apply_model, [provider_dropdown, model_dropdown], [switch_status])
 
-    kb_upload_btn.click(do_ingest_files, [kb_files], [ingest_status])
+    kb_upload_btn.click(do_ingest_files, [kb_files, kb_mode], [ingest_status])
     jobs_timer.tick(_tick_jobs, None, [jobs_html, kb_table])
     okf_import_btn.click(do_okf_import, [okf_dir_input], [okf_status_md])
     fts_index_btn.click(do_fts_index, [fts_dir_input, fts_pattern], [fts_status_md])
