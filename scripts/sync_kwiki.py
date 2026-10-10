@@ -97,6 +97,20 @@ _UNDOWNLOADABLE = object()
 INGESTABLE_SUFFIXES = {".docx", ".pdf", ".md", ".xlsx", ".csv", ".txt"}
 # 超过此大小不下载（视频等），单位 MB
 MAX_FILE_MB = float(os.getenv("MAX_FILE_MB", "50"))
+MAX_DOC_MB = float(os.getenv("MAX_DOC_MB", "300"))   # 可摄入文档的上限；MAX_FILE_MB 只管视频等
+MAX_FAILS = int(os.getenv("SYNC_MAX_FAILS", "3"))      # 同一版本连续失败几次后放弃
+MAX_DELETE = int(os.getenv("SYNC_MAX_DELETE", "20"))   # 单轮删除上限，超了视为异常不删
+SKIP_PATH_KEYWORDS = ("［Driver］",)
+SKIP_TITLES = {t for t in os.getenv("SYNC_SKIP_TITLES",
+               "SE306(FSE &Training+Manual)").split("|") if t}  # 已手工切分入库的原件
+CHUNKED_SUFFIXES = {".pdf", ".docx", ".xlsx", ".csv"}  # 入库后可在 Qdrant 回查 chunk 的类型
+COLLECTION = os.getenv("QDRANT_COLLECTION", "nikon_expert_v1")
+KNOWN_EXTS = ['.7z', '.csv', '.doc', '.docx', '.gif', '.jpeg', '.jpg', '.md', '.mov', '.mp4', '.pdf', '.png', '.ppt', '.pptx', '.rar', '.txt', '.xls', '.xlsx', '.zip']
+import re as _re
+SKIP_TITLE_PATTERNS = [  # 同一套资料的重复版本；S207DS307E 电路图库里只留"已融合"版
+    r"^S207DS307E Electrical Circuit Diagram Rev\. 1\.0 \(Volume \d ?of 5\)(?!-已融合)",
+    r"^S307E-RF-ELCIRC-R10-B1-\d",
+]
 
 
 def sniff_ext(path: Path) -> str:
@@ -271,6 +285,10 @@ def _ensure_embed():
     if _embed_ready[0]:
         return
     from llama_index.core import Settings
+    if Settings._embed_model is None and os.getenv("EMBED_API_KEY", "").strip():
+        from src.api_embedding import APIEmbedding  # 与 MCP 查询同一个云端 bge-m3，不吃本地 CPU
+        Settings.embed_model = APIEmbedding()
+        print(f"⚙️  入库 Embedding：云端 API（{Settings.embed_model.model_name}）")
     if Settings._embed_model is None:
         from llama_index.embeddings.huggingface import HuggingFaceEmbedding
         from src.device import get_device
@@ -300,8 +318,12 @@ def ingest_dispatch(local_path: Path, doc_type: str):
         from src.ingest_docx import ingest_docx
         ingest_docx(str(local_path), doc_type=doc_type, machine_model=MACHINE_MODEL)
     elif suffix == ".pdf":
-        from src.ingestor import ingest_pdf
-        ingest_pdf(str(local_path), machine_model=MACHINE_MODEL, language="zh")
+        if "circuit diagram" in local_path.name.lower():
+            from src.ingestor import ingest_circuit_pdf
+            ingest_circuit_pdf(str(local_path), machine_model=MACHINE_MODEL)
+        else:
+            from src.ingestor import ingest_pdf
+            ingest_pdf(str(local_path), machine_model=MACHINE_MODEL, language="zh")
     elif suffix in (".xlsx", ".csv"):
         if doc_type == "fault_history":
             from src.ingestor import ingest_fault_history
@@ -340,6 +362,23 @@ def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=1))
 
 
+def _qdrant():
+    from qdrant_client import QdrantClient
+    return QdrantClient(url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333"))
+
+
+def _kb_count(qc, doc_name: str) -> int:
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    f = Filter(must=[FieldCondition(key="doc_name", match=MatchValue(value=doc_name))])
+    return qc.count(COLLECTION, count_filter=f, exact=True).count
+
+
+def _delete_doc(qc, doc_name: str):
+    """向量库 + FTS 一起删（_delete_existing 已含 FTS 删除）"""
+    from src.ingestor import _delete_existing
+    _delete_existing(qc, COLLECTION, doc_name)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--probe", action="store_true",
@@ -347,8 +386,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="只列出计划，不下载不摄入")
     ap.add_argument("--no-ingest", action="store_true", help="只镜像，不摄入")
     ap.add_argument("--reingest", action="store_true",
-                    help="不下载，直接把本地镜像里的文件全部重新摄入"
-                         "（摄入曾失败时用）")
+                    help="不下载，直接把本地镜像里的文件全部重新摄入（摄入曾失败时用）")
     ap.add_argument("--force", action="store_true", help="忽略状态，全量重新下载")
     args = ap.parse_args()
 
@@ -389,8 +427,11 @@ def main():
     print(f"共 {len(files)} 个文件")
 
     state = {} if args.force else load_state()
-    stats = {"synced": 0, "skipped_dir": 0, "skipped_undownloadable": 0,
-             "unchanged": 0, "failed": 0, "ingested": 0}
+    stats = {"synced": 0, "skipped_dir": 0, "skipped_rule": 0,
+             "skipped_undownloadable": 0, "unchanged": 0, "failed": 0,
+             "ingested": 0, "ingest_failed": 0, "gave_up": 0,
+             "renamed": 0, "deleted": 0}
+    qc = None if (args.dry_run or args.no_ingest) else _qdrant()
 
     for f in files:
         doc_type, should_sync = map_dir(f["rel_path"])
@@ -399,18 +440,29 @@ def main():
         if not should_sync:
             stats["skipped_dir"] += 1
             continue
+        if any(k in label for k in SKIP_PATH_KEYWORDS) or f["title"] in SKIP_TITLES or any(_re.search(r, f["title"]) for r in SKIP_TITLE_PATTERNS) or any(_re.search(r, f["title"]) for r in SKIP_TITLE_PATTERNS) \
+                or any(_re.search(r, f["title"]) for r in SKIP_TITLE_PATTERNS):
+            stats["skipped_rule"] += 1
+            continue
         if f["doc_type"] in UNDOWNLOADABLE:
             print(f"  ⏭  OTL 智能文档无法下载: {label}")
             stats["skipped_undownloadable"] += 1
             continue
 
         prev = state.get(f["kuid"], {})
-        if f["token"] and prev.get("token") == f["token"] and not args.force:
-            stats["unchanged"] += 1
-            continue
+        same_ver = bool(f["token"]) and prev.get("token") == f["token"]
+        if same_ver and not args.force:
+            if prev.get("fails", 0) >= MAX_FAILS:
+                stats["gave_up"] += 1
+                continue
+            if not prev.get("fails") and not prev.get("retry") and prev.get("sha") != "oversize":
+                stats["unchanged"] += 1
+                continue
+            # 走到这里 = 上次摄入失败，或旧规则下被判超大 → 重试
 
         dest = MIRROR / f["rel_path"] / f["title"]
-        print(f"  ⬇  {label}  [{doc_type}]")
+        retry = f"（重试，已失败 {prev['fails']} 次）" if prev.get("fails") else ""
+        print(f"  ⬇  {label}  [{doc_type}]{retry}")
         if args.dry_run:
             stats["synced"] += 1
             continue
@@ -423,19 +475,8 @@ def main():
             stats["failed"] += 1
             continue
 
-        # 大文件（视频等）直接删掉不留镜像，也不摄入
-        size_mb = dest.stat().st_size / 1024 / 1024
-        if size_mb > MAX_FILE_MB:
-            print(f"    ⏭  {size_mb:.0f}MB 超过上限 {MAX_FILE_MB:.0f}MB，跳过: {dest.name}")
-            dest.unlink()
-            state[f["kuid"]] = {"title": f["title"], "token": f["token"],
-                                "sha": "oversize", "synced_at": time.strftime("%F %T")}
-            save_state(state)
-            stats["skipped_oversize"] = stats.get("skipped_oversize", 0) + 1
-            continue
-
         # 无扩展名的未知类型：按魔数补名，让后缀分发能接住
-        if not dest.suffix:
+        if dest.suffix.lower() not in KNOWN_EXTS:  # 标题带点(Rev. 2.0)会被误当扩展名
             ext = sniff_ext(dest)
             if ext:
                 new_dest = dest.with_name(dest.name + ext)
@@ -443,21 +484,61 @@ def main():
                 dest = new_dest
                 print(f"    ↳ 识别为 {ext}: {dest.name}")
 
+        ingestable = dest.suffix.lower() in INGESTABLE_SUFFIXES
+        size_mb = dest.stat().st_size / 1024 / 1024
+        limit = MAX_DOC_MB if ingestable else MAX_FILE_MB
+        if size_mb > limit:
+            print(f"    ⏭  {size_mb:.0f}MB 超过上限 {limit:.0f}MB，跳过: {dest.name}")
+            dest.unlink()
+            state[f["kuid"]] = {"title": f["title"], "token": f["token"],
+                                "sha": "oversize_v2", "synced_at": time.strftime("%F %T")}
+            save_state(state)
+            stats["skipped_oversize"] = stats.get("skipped_oversize", 0) + 1
+            continue
+
         sha = hashlib.sha256(dest.read_bytes()).hexdigest()[:16]
-        content_changed = sha != prev.get("sha")
-        state[f["kuid"]] = {"title": f["title"], "token": f["token"],
-                            "sha": sha, "synced_at": time.strftime("%F %T")}
+        old_name = prev.get("doc_name") or prev.get("title")
+        renamed = bool(old_name) and old_name != dest.name
+        entry = {"title": f["title"], "token": f["token"], "sha": sha,
+                 "doc_name": dest.name, "synced_at": time.strftime("%F %T")}
         stats["synced"] += 1
 
-        if content_changed and not args.no_ingest \
-                and dest.suffix.lower() in INGESTABLE_SUFFIXES:
+        if (sha != prev.get("sha") or renamed) and not args.no_ingest and ingestable:
             try:
                 ingest_dispatch(dest, doc_type)
+                if dest.suffix.lower() in CHUNKED_SUFFIXES and _kb_count(qc, dest.name) == 0:
+                    raise RuntimeError("入库后 0 个 chunk（多半是纯图片、没有可读文字）")
                 stats["ingested"] += 1
+                if renamed:
+                    _delete_doc(qc, old_name)
+                    stats["renamed"] += 1
+                    print(f"    ↻  改名：已删除旧文档 {old_name}")
             except Exception as e:
-                print(f"    ⚠️  摄入失败 {dest.name}: {e}")
+                fails = prev.get("fails", 0) + 1 if same_ver else 1
+                print(f"    ⚠️  摄入失败（第 {fails} 次）{dest.name}: {e}")
+                entry.update(sha=None, fails=fails, last_error=str(e)[:200])
+                stats["ingest_failed"] += 1
 
+        state[f["kuid"]] = entry
         save_state(state)  # 每个文件存一次，天然断点续传
+
+    # WPS 里已删除的 → 库里同步删除（带上限保护）
+    if qc is not None:
+        seen = {f["kuid"] for f in files}
+        gone = [k for k in state if k not in seen]
+        if gone:
+            if not files or len(gone) > MAX_DELETE:
+                print(f"\n⚠️  有 {len(gone)} 个文件在 WPS 里找不到，超过单轮上限 {MAX_DELETE}，"
+                      f"可能是遍历出错，本轮不删。确认无误后临时调大 SYNC_MAX_DELETE 再跑。")
+            else:
+                for k in gone:
+                    v = state.pop(k)
+                    name = v.get("doc_name") or v.get("title")
+                    if name and v.get("sha") not in (None, "oversize", "oversize_v2"):
+                        _delete_doc(qc, name)
+                        print(f"  🗑  WPS 已删除，库里同步删除: {name}")
+                    stats["deleted"] += 1
+                save_state(state)
 
     print("\n" + "=" * 50)
     for k, v in stats.items():

@@ -59,6 +59,7 @@ def _get_storage():
 def _delete_existing(client, collection: str, doc_name: str) -> int:
     """删除向量库中指定文档的全部数据（去重前置步骤）"""
     from qdrant_client.models import Filter, FieldCondition, MatchValue, FilterSelector
+    _fts_delete_by_name(doc_name)  # 同时清 FTS，避免旧版残留
     try:
         result = client.delete(
             collection_name=collection,
