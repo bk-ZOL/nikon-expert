@@ -310,10 +310,35 @@ def map_dir(rel_path: str):
     return ("manual", True)  # 未知目录默认当 manual 同步
 
 
+def _convert_legacy_office(path: Path, suffix: str):
+    """扩展名是 .xlsx/.docx、实际却是老 Office(OLE) 的文件，用 LibreOffice 转成新格式。
+    转换结果放临时目录、文件名不变，doc_name / ACL / chunk 回查都不受影响。"""
+    if suffix not in (".xlsx", ".docx"):
+        return path
+    try:
+        if path.open("rb").read(4) != b"\xd0\xcf\x11\xe0":
+            return path
+    except Exception:
+        return path
+    import subprocess, tempfile, shutil
+    tmp = Path(tempfile.mkdtemp(prefix="legacy_"))
+    src = tmp / (path.stem + (".xls" if suffix == ".xlsx" else ".doc"))
+    shutil.copy(path, src)
+    r = subprocess.run(["soffice", "--headless", "--convert-to", suffix[1:],
+                        "--outdir", str(tmp), str(src)],
+                       capture_output=True, text=True, timeout=600)
+    out = tmp / path.name
+    if not out.exists():
+        raise RuntimeError("LibreOffice 转换失败: " + (r.stderr or r.stdout).strip()[:200])
+    print(f"    ↻ 老格式已转换为 {suffix}: {path.name}")
+    return out
+
+
 def ingest_dispatch(local_path: Path, doc_type: str):
     """按后缀 + doc_type 分发到现有摄入管线。"""
     _ensure_embed()
     suffix = local_path.suffix.lower()
+    local_path = _convert_legacy_office(local_path, suffix)  # 老 .xls/.doc 先转换
     if suffix == ".docx":
         from src.ingest_docx import ingest_docx
         ingest_docx(str(local_path), doc_type=doc_type, machine_model=MACHINE_MODEL)
