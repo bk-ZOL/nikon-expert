@@ -506,7 +506,9 @@ def main():
         if (sha != prev.get("sha") or renamed) and not args.no_ingest and ingestable:
             try:
                 ingest_dispatch(dest, doc_type)
-                if dest.suffix.lower() in CHUNKED_SUFFIXES and _kb_count(qc, dest.name) == 0:
+                if dest.suffix.lower() in CHUNKED_SUFFIXES \
+                        and "circuit diagram" not in dest.name.lower() \
+                        and _kb_count(qc, dest.name) == 0:
                     raise RuntimeError("入库后 0 个 chunk（多半是纯图片、没有可读文字）")
                 stats["ingested"] += 1
                 if renamed:
