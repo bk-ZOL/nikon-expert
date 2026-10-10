@@ -100,12 +100,25 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
     # 重复调用直接返回提示，避免小模型 ReAct 在工具间空转、无谓消耗迭代。
     _call_cache = {}
 
-    def _memo(name, arg, run):
-        key = (name, (arg or "").strip().lower())
+    from src.util_timeout import call_with_timeout
+
+    import re as _re
+
+    def _norm_arg(arg):
+        # 归一化去重键：去掉分隔符/空白，让 E-5301 / E5301 / e 5301 视为同一次调用，
+        # 避免小模型换着写法把同一个码反复搜、空转步数。
+        return _re.sub(r"[\s\-_./]", "", (arg or "").strip().lower())
+
+    def _memo(name, arg, run, timeout=30):
+        key = (name, _norm_arg(arg))
         if key in _call_cache:
             return (f"（你本轮已用相同参数调用过 {name}，结果同上，请不要重复调用；"
                     f"若信息已足够就直接给出最终结论。）")
-        result = run()
+        # 软超时：单个工具卡住不拖垮整个 ReAct 循环，超时返回提示让 LLM 继续。
+        result = call_with_timeout(
+            run, timeout,
+            on_timeout=lambda: (f"（{name} 超时（>{timeout}s）已跳过。请基于已取得的信息作答，"
+                                f"或改用其它工具/换个参数，不要重试同一调用。）"))
         _call_cache[key] = True
         return result
 
@@ -173,7 +186,7 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
         def run():
             from src.figures import inspect_diagram as _inspect
             return _inspect(query)
-        return _memo("inspect_diagram", query, run)
+        return _memo("inspect_diagram", query, run, timeout=90)
 
     def trace_connection(query: str) -> str:
         """连接追踪：确认某元件/传感器/信号"连到哪、用哪根线、哪个 pin、到哪个面板/板卡"。
@@ -183,7 +196,7 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
         def run():
             from src.net_trace import trace_connection as _trace
             return _trace(query)
-        return _memo("trace_connection", query, run)
+        return _memo("trace_connection", query, run, timeout=90)
 
     return [
         FunctionTool.from_defaults(fn=error_code_lookup),

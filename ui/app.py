@@ -4,8 +4,13 @@ Nikon Expert — Gradio 工程师交互界面
 支持两种模式：
   BACKEND_MODE=local  — 直接调用 src.engine（默认，单机模式）
   BACKEND_MODE=remote — 通过 HTTP 调用 FastAPI 服务（多用户服务器模式）
+
+界面层：Claude 风格主题（nikon_theme）+ 可折叠侧栏（gr.Sidebar）+ 真视图切换
+（对话 / 知识库 / 工作日志 / 错误码速查 / 审计）。壳子结构对齐 demo_app.py，
+所有交互都接到真实后端；后端逻辑一概不改。
 """
 import sys, os, json, html as _html
+from pathlib import Path as _Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from dotenv import load_dotenv
@@ -15,6 +20,7 @@ import pandas as pd
 import requests as _requests
 import gradio as gr
 from ui.client import BackendClient
+from nikon_theme import nikon_theme
 
 # ── 全局 BackendClient ──────────────────────────────────────────
 backend = BackendClient()
@@ -38,7 +44,9 @@ except Exception:
     pass
 
 
-# ── 回调函数 ─────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# 后端回调（业务逻辑，未改动）
+# ══════════════════════════════════════════════════════════════════
 def _resolve_login_user(request):
     """从 Gradio 登录态解析 acl.User。security 关→None(不过滤)。
     开启但解析不到有效用户→抛错(fail-closed，宁可拒绝不放行)。"""
@@ -52,10 +60,85 @@ def _resolve_login_user(request):
     return acl.load_user(uid, _get_conn())
 
 
+def _client_ip(request) -> str:
+    """真实客户端 IP：经 Tailscale Serve/反代时真 IP 在 X-Forwarded-For 首段。"""
+    if request is None:
+        return ""
+    try:
+        hdrs = getattr(request, "headers", {}) or {}
+        xff = hdrs.get("x-forwarded-for") or hdrs.get("X-Forwarded-For")
+        if xff:
+            return xff.split(",")[0].strip()
+        cli = getattr(request, "client", None)
+        return getattr(cli, "host", "") or ""
+    except Exception:
+        return ""
+
+
+def _client_ua(request) -> str:
+    try:
+        hdrs = getattr(request, "headers", {}) or {}
+        return hdrs.get("user-agent") or hdrs.get("User-Agent") or ""
+    except Exception:
+        return ""
+
+
+def _track(request, action: str) -> None:
+    """记一条使用审计（best-effort，不影响主流程）。"""
+    try:
+        from src import audit
+        uid = getattr(request, "username", None) or "匿名"
+        audit.log(uid, action, _client_ip(request), _client_ua(request))
+    except Exception:
+        pass
+
+
+def _stream_with_watchdog(question, mode, history, idle=60, total=360):
+    """看门狗包装：把 query_stream 丢到后台线程，主循环带超时地拉取。
+    任何下游卡死（LLM 停顿/工具无响应/检索死锁）→ idle 秒无新数据即判超时，
+    给出提示并结束，绝不让界面无限转圈。用 copy_context 把 ACL 身份带进线程。
+    产出 (kind, payload)：('data', 5元组) / ('perm',None) / ('err',msg) / ('timeout','idle'|'total')。"""
+    import contextvars
+    import queue as _q
+    import threading
+    import time as _t
+    from src import acl
+    out: "_q.Queue" = _q.Queue()
+    DONE = object()
+
+    def pump():
+        try:
+            for item in backend.query_stream(question, mode=mode, history=history):
+                out.put(("data", item))
+        except acl.PermissionDenied:
+            out.put(("perm", None))
+        except Exception as e:
+            out.put(("err", f"{type(e).__name__}: {e}"))
+        finally:
+            out.put((DONE, None))
+
+    ctx = contextvars.copy_context()
+    threading.Thread(target=lambda: ctx.run(pump), daemon=True).start()
+    start = _t.time()
+    while True:
+        try:
+            kind, payload = out.get(timeout=idle)
+        except _q.Empty:
+            yield ("timeout", "idle")
+            return
+        if kind is DONE:
+            return
+        yield (kind, payload)
+        if _t.time() - start > total:
+            yield ("timeout", "total")
+            return
+
+
 def chat(question: str, history: list, request: gr.Request = None):
     if not question.strip():
         yield (history or []), "", ""
         return
+    _track(request, "对话")
     from src.router import auto_mode
     from src import acl
     mode_key = auto_mode(question)
@@ -63,9 +146,9 @@ def chat(question: str, history: list, request: gr.Request = None):
 
     new_history = history + [
         {"role": "user", "content": question},
-        {"role": "assistant", "content": ""},
+        {"role": "assistant", "content": "🔍 正在检索知识库…"},
     ]
-    yield new_history, "", ""
+    yield new_history, "", ""   # 即时心跳：检索/首字前先显示活动，避免"像卡住"
 
     # 绑定登录用户到 contextvar：本地模式下引擎深处（含 agent 工具）据此按 ACL 过滤
     try:
@@ -78,8 +161,21 @@ def chat(question: str, history: list, request: gr.Request = None):
 
     accumulated = ""
     citations_data = []
+    problem = None
     try:
-        for delta, is_final, citations, cit_data, has_result in backend.query_stream(question, mode=mode_key, history=history):
+        for kind, payload in _stream_with_watchdog(question, mode_key, history):
+            if kind == "timeout":
+                problem = ("⏱️ 响应超时——后端可能临时卡住或网络中断，已中断本次。稍等重发一般就好；"
+                           "若频繁如此多为大脑/工具临时无响应。" if payload == "idle"
+                           else "⏱️ 本次处理时间过长，已自动结束。把问题拆细一点再问会更稳。")
+                break
+            if kind == "perm":
+                problem = "⛔ 权限不足，无法检索到你有权访问的资料。"
+                break
+            if kind == "err":
+                problem = f"⚠️ 后端出错：{payload}"
+                break
+            delta, is_final, citations, cit_data, has_result = payload
             if is_final:
                 if has_result and citations:
                     citations_data = cit_data
@@ -91,10 +187,10 @@ def chat(question: str, history: list, request: gr.Request = None):
                 accumulated += delta
                 new_history[-1]["content"] = accumulated
             yield new_history, "", ""
-    except acl.PermissionDenied:
-        new_history[-1]["content"] = "⛔ 权限不足，无法检索到你有权访问的资料。"
-        yield new_history, "", ""
-        return
+        if problem:
+            new_history[-1]["content"] = (accumulated + "\n\n" + problem) if accumulated else problem
+            yield new_history, "", ""
+            return
     finally:
         acl.reset_current_user(_tok)
 
@@ -221,6 +317,18 @@ def do_get_kb_docs():
         df = df.rename(columns=col_map)
     if "选择" not in df.columns:
         df.insert(0, "选择", False)
+    # 刚上传的文档置顶 + 🆕 标记：字母序会把新文档埋在中间，用户以为没成功。
+    try:
+        from src import ingest_queue
+        recent = ingest_queue.recent_done_names()
+    except Exception:
+        recent = []
+    if recent and "文档名" in df.columns:
+        rank = {n: i for i, n in enumerate(recent)}
+        df["_r"] = df["文档名"].map(lambda x: rank.get(x, 10 ** 9))
+        df = df.sort_values("_r", kind="stable").drop(columns="_r").reset_index(drop=True)
+        df["文档名"] = df["文档名"].map(
+            lambda x: f"🆕 {x}" if (x in rank and not str(x).startswith("🆕")) else x)
     return df
 
 
@@ -228,7 +336,8 @@ def do_delete_selected(df_data):
     if df_data is None or len(df_data) == 0:
         return "⚠️ 列表为空", do_get_kb_docs()
     df = df_data if isinstance(df_data, pd.DataFrame) else pd.DataFrame(df_data)
-    selected = df[df["选择"] == True]["文档名"].tolist()
+    selected = [(n[len("🆕"):].strip() if str(n).startswith("🆕") else n)
+                for n in df[df["选择"] == True]["文档名"].tolist()]
     if not selected:
         return "⚠️ 请先勾选要删除的文档", df
     for name in selected:
@@ -282,159 +391,101 @@ def do_get_fts_paths():
     return pd.DataFrame(paths)
 
 
-# ── 界面布局 ─────────────────────────────────────────────────────
-CITATION_CSS = """
-.citation-bar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 4px;
-    padding: 8px 4px;
-    border-top: 1px solid #e0e0e0;
-}
-.cite-label {
-    font-size: 12px;
-    color: #888;
-    flex-shrink: 0;
-}
-.cite-link {
-    font-size: 12px;
-    color: #2a6cb6;
-    text-decoration: none;
-    padding: 2px 8px;
-    border: 1px solid #c5ddf0;
-    border-radius: 10px;
-    background: #f0f6ff;
-    white-space: nowrap;
-}
-.cite-link:hover {
-    background: #dbe8f8;
-    border-color: #4a90d9;
-}
-.cite-text {
-    font-size: 12px;
-    color: #666;
-}
-"""
-
-# ══ 新界面资源（Claude 风格主题 · 侧栏 · 图标）══════════════════════
-from pathlib import Path as _Path
-from nikon_theme import nikon_theme
-_UI_DIR = _Path(__file__).parent
-_NK_CSS = (_UI_DIR / "nikon_expert.css").read_text(encoding="utf-8")
-_FAVICON = str(_UI_DIR / "ne_kaushan.svg")
-
-# 答案内 Markdown 表格美化（【参数速查】【按机型区分】等）——配主题陶土色
-_TABLE_CSS = """
-.message.bot table, .message-row.bot-row .message table {
-  width:100%; border-collapse:separate !important; border-spacing:0 !important;
-  margin:.85em 0 !important; font-size:.88rem !important;
-  border:1px solid var(--nk-line) !important; border-radius:10px !important;
-  overflow:hidden !important; background:var(--nk-surface) !important;
-  box-shadow:0 1px 3px rgba(43,43,38,.05);
-}
-.message.bot thead th, .message-row.bot-row thead th {
-  background:var(--nk-clay-soft) !important; color:var(--nk-ink) !important;
-  font-weight:600 !important; text-align:left !important; padding:9px 14px !important;
-  border:none !important; border-bottom:1px solid var(--nk-line) !important;
-  white-space:nowrap; letter-spacing:.01em;
-}
-.message.bot tbody td, .message-row.bot-row tbody td {
-  padding:8px 14px !important; border:none !important;
-  border-bottom:1px solid var(--nk-line) !important;
-  color:var(--nk-ink) !important; vertical-align:top; line-height:1.55;
-}
-.message.bot tbody tr:last-child td { border-bottom:none !important; }
-.message.bot tbody tr:nth-child(even) td { background:rgba(120,80,60,.035) !important; }
-.dark .message.bot tbody tr:nth-child(even) td { background:rgba(255,255,255,.035) !important; }
-.message.bot tbody tr:hover td { background:var(--nk-clay-soft) !important; }
-.message.bot table code { font-family:var(--nk-mono) !important; font-size:.82rem !important; }
-@media (max-width:640px){ .message.bot table { font-size:.8rem !important; }
-  .message.bot thead th, .message.bot tbody td { padding:6px 9px !important; } }
-"""
-_LOGO_SVG = (_UI_DIR / "ne_kaushan.svg").read_text(encoding="utf-8").replace(
-    'width="64" height="64"', 'class="nk-logo" width="26" height="26"')
-
-_SIDE_TOP = (f'<div id="nk-side" style="padding:14px 12px 0;"><div class="nk-side-top">'
-             f'{_LOGO_SVG}<span class="nk-name">Nikon Expert</span></div></div>')
-_SIDE_RECENT = ('<div id="nk-side" style="padding:6px 12px 0;"><div class="nk-recent">'
-                '<div class="nk-recent-head">最近</div>'
-                '<a class="nk-recent-item">S207 对准误差排查</a>'
-                '<a class="nk-recent-item">E-5301 报警排查</a>'
-                '<a class="nk-recent-item">传送 SMIF 确认</a>'
-                '<a class="nk-recent-item">GOCS 说明</a></div></div>')
-_TOOLS = ('<div class="nk-tools">'
-          '<span class="nk-pill">知识库检索 <code>nikon_query</code></span>'
-          '<span class="nk-pill">错误码 <code>search_error_code</code></span>'
-          '<span class="nk-pill">WPS 实时 <code>ask_wps</code></span>'
-          '<span class="nk-pill">工作日志 <code>query_worklog</code></span></div>')
+_VIEWS = ["chat", "kb", "worklog", "err", "admin"]
+# 与 _VIEWS 对齐的导航图标类（切视图时要一并带上，否则 elem_classes 覆盖会丢图标）
+_NAV_ICONS = ["nk-ic-chat", "nk-ic-kb", "nk-ic-log", "nk-ic-err", "nk-ic-audit"]
 
 
-def _account_html(name="工程师", role="已登录"):
-    initial = _html.escape((name or "工")[0])
-    return (f'<div id="nk-side" style="padding:0 12px 12px;"><div class="nk-account">'
-            f'<div class="nk-avatar">{initial}</div><div class="nk-acc-info">'
-            f'<span class="nk-acc-name">{_html.escape(name)}</span>'
-            f'<span class="nk-acc-role">{_html.escape(role)}</span></div></div></div>')
-
-
-def _maintop_html():
+def _is_admin_user(request) -> bool:
+    """是否管理员/审计员可见审计页。security 关时不设门槛（单机/调试）。"""
     try:
-        s = backend.db_status()
-        pts = s.get("points", 0) if isinstance(s, dict) else 0
-        ok = isinstance(s, dict) and s.get("status") == "ok"
+        from src import acl
+        if not acl.security_enabled():
+            return True
+        u = _resolve_login_user(request)
+        return bool(u and (getattr(u, "is_superuser", False)
+                           or u.role in ("kb_admin", "auditor")))
     except Exception:
-        pts, ok = 0, False
-    try:
-        model = backend.get_current_model()
-    except Exception:
-        model = os.getenv("LLM_MODEL", "")
-    return (f'<div id="nk-maintop" style="display:flex;justify-content:space-between;'
-            f'align-items:center;padding:14px 4px 4px;">'
-            f'<span class="nk-tagline">光刻机设备知识库 · 按权限可见</span>'
-            f'<span class="nk-status" style="font-family:var(--nk-mono);font-size:.68rem;'
-            f'color:var(--nk-ink-faint);display:inline-flex;align-items:center;gap:6px;">'
-            f'<span class="dot" style="width:6px;height:6px;border-radius:50%;'
-            f'background:{"#6FAE8E" if ok else "#C0705C"};"></span>'
-            f'{_html.escape(str(model))} · {pts:,} vectors · {"online" if ok else "offline"}</span></div>')
+        return False
 
 
-_VIEWS = ["chat", "kb", "worklog", "err"]
+def _reveal_admin(request: gr.Request = None):
+    """页面加载时：仅管理员显示「审计」导航按钮。"""
+    return gr.update(visible=_is_admin_user(request))
+
+
+def do_admin_report(request: gr.Request = None):
+    """管理员审计：用户权限总览 + 登录/使用记录（含 IP 归属地）。"""
+    import datetime as _dt
+    perm_cols = ["用户", "角色", "密级", "归属域", "状态"]
+    log_cols = ["时间", "用户", "操作", "IP", "归属地", "结果", "设备"]
+    if not _is_admin_user(request):
+        return ("⛔ 仅管理员可见。",
+                pd.DataFrame(columns=perm_cols), pd.DataFrame(columns=log_cols))
+    from src import audit
+    perms = audit.user_permissions()
+    pdf = (pd.DataFrame([{"用户": p["uid"], "角色": p["role"], "密级": p["clearance"],
+                          "归属域": p["scopes"], "状态": p["status"]} for p in perms])
+           if perms else pd.DataFrame(columns=perm_cols))
+    evs = audit.recent_events(200)
+    rows = []
+    for e in evs:
+        t = _dt.datetime.fromtimestamp(e["ts"]).strftime("%Y-%m-%d %H:%M:%S")
+        ua = e["ua"] or ""
+        dev = ("手机" if any(k in ua for k in ("Mobile", "iPhone", "Android"))
+               else ("桌面" if ua else "—"))
+        rows.append({"时间": t, "用户": e["uid"], "操作": e["action"], "IP": e["ip"] or "—",
+                     "归属地": audit.geo(e["ip"]), "结果": "✅" if e["ok"] else "❌", "设备": dev})
+    ldf = pd.DataFrame(rows) if rows else pd.DataFrame(columns=log_cols)
+    return (f"👥 {len(perms)} 个用户 · 📊 最近 {len(evs)} 条使用记录（IP 归属地按需查询并缓存）。",
+            pdf, ldf)
 
 
 def _switch_view(target):
     vis = [gr.update(visible=(v == target)) for v in _VIEWS]
-    btns = [gr.update(elem_classes=["nk-navbtn", "nk-navbtn-active"] if v == target
-                      else ["nk-navbtn"]) for v in _VIEWS]
+    btns = []
+    for v, ic in zip(_VIEWS, _NAV_ICONS):
+        cls = ["nk-navbtn", ic]
+        if v == target:
+            cls.append("nk-navbtn-active")
+        btns.append(gr.update(elem_classes=cls))
     return vis + btns
 
 
-def do_ingest_files(paths, mode="☁️ 云端向量化"):
-    """异步上传：文件入队即返回，后台单线程串行摄入（不阻塞界面/查询）。
-    PDF 在 CPU 上较慢也没关系——用户不用干等，任务面板显示进度，完成自动进列表。
-
-    mode='🖥 本地向量化' 时：云端网页调不到你 Mac 算力，引导去本机工具。"""
+def do_ingest_files(paths, mode="☁️ 云端 API", request: gr.Request = None):
+    """异步上传：文件入队即返回，后台子进程串行摄入（不阻塞界面/查询）。
+    mode 决定向量化方式，两种都在服务器上跑、向量同空间兼容：
+      ☁️ 云端 API   → INGEST_EMBED=api  （快，文本发给硅基流动）
+      🖥 服务器本地 → INGEST_EMBED=local（用服务器自带 BGE-M3，文本不出服务器，较慢）
+    任务面板实时进度条，完成自动置顶进文档表。"""
     from src import ingest_queue
-    if mode and "本地" in mode:
-        return ("🖥 **本地向量化用的是你 Mac 的算力，这个云端网页（服务器）调不到它。**\n\n"
-                "请在你 **Mac 上**打开本地工具：**http://127.0.0.1:7870**\n"
-                "（若没开：Mac 终端里 `cd ~/nikon-expert && .venv/bin/python scripts/local_ingest_ui.py`）\n\n"
-                "那个本机页面同样有本地/云端开关，**本地模式**会用你 Mac 快速嵌好、再自动推到这个云端库。\n\n"
-                "_想在这里直接传，就切到「☁️ 云端向量化」，服务器后台慢慢嵌（几分钟，不用等）。_")
+    _track(request, "上传")
     if not paths:
-        return "⚠️ 请先选择文件"
+        return "⚠️ 请先选择文件", _jobs_html()
     if not isinstance(paths, list):
         paths = [paths]
+    if mode and "Mac" in mode:
+        embed_mode = "mac"
+    elif mode and "本地" in mode:
+        embed_mode = "local"
+    else:
+        embed_mode = "api"
     n = 0
     for p in paths:
         fp = p if isinstance(p, str) else getattr(p, "name", None)
         if fp:
-            ingest_queue.enqueue(fp, os.path.basename(fp))
+            ingest_queue.enqueue(fp, os.path.basename(fp), embed_mode)
             n += 1
     if not n:
-        return "⚠️ 未取到文件路径"
-    return (f"✅ 已加入队列（{n} 个），后台处理中——**不用等，可继续用**。"
-            "完成后会自动出现在下方「向量库文档管理」列表（大 PDF 可能要几分钟）。")
+        return "⚠️ 未取到文件路径", _jobs_html()
+    way = {"local": "🖥 服务器本地模型（文本不外传，CPU 较慢）",
+           "mac": "💻 我的 Mac 算力（经 Tailscale，Mac GPU 加速）",
+           "api": "☁️ 云端 API（快）"}[embed_mode]
+    # 立即渲染任务面板（不用等 Timer），完成后自动置顶到文档表首行并标 🆕
+    return (f"✅ 已加入队列（{n} 个）· 方式：{way}。**下方「上传任务」有实时进度条。**\n\n"
+            "完成后该文档会自动出现在「向量库文档管理」**第一行、带 🆕 标记**——看到它就是成功了。"
+            "期间不用等，可继续用。",
+            _jobs_html())
 
 
 _JOB_ICON = {"queued": "⏳ 排队", "processing": "⚙️ 处理中", "done": "✅ 完成", "failed": "❌ 失败"}
@@ -445,22 +496,46 @@ def _fmt_elapsed(sec):
     return f"{sec//60}m{sec%60:02d}s" if sec >= 60 else f"{sec}s"
 
 
+def _bar_html(pct, faint=False, done=False):
+    """行内进度条（无需外部 CSS）。done=绿，faint=浅蓝(不确定阶段)，否则蓝。"""
+    color = "#16a34a" if done else ("#93c5fd" if faint else "#2563eb")
+    return (f'<div style="background:rgba(148,163,184,.25);border-radius:6px;height:8px;'
+            f'overflow:hidden;margin:2px 0 12px;">'
+            f'<div style="width:{max(0,min(100,pct))}%;height:100%;background:{color};'
+            f'transition:width .3s ease;"></div></div>')
+
+
 def _jobs_html():
     import time as _t
-    from src import ingest_queue
+    from src import ingest_queue, ingest_progress
     jobs = ingest_queue.recent_jobs()
     if not jobs:
         return ""
     rows = []
     for j in jobs:
-        label = _JOB_ICON.get(j["status"], j["status"])
-        if j["status"] == "processing" and j.get("ts_start"):
-            label = f'⚙️ 处理中 · 已 {_fmt_elapsed(_t.time() - j["ts_start"])}'
-        elif j["status"] == "failed" and j.get("message"):
+        status = j["status"]
+        label = _JOB_ICON.get(status, status)
+        bar = ""
+        if status == "processing":
+            elapsed = _fmt_elapsed(_t.time() - j["ts_start"]) if j.get("ts_start") else ""
+            prog = ingest_progress.read(str(j["id"]))
+            if prog and prog.get("total", 0) > 0:
+                done, total = prog["done"], prog["total"]
+                pct = int(done * 100 / total)
+                label = f'⚙️ {prog.get("stage", "嵌入向量")} {pct}% · {done}/{total} 块 · 已 {elapsed}'
+                bar = _bar_html(pct)
+            else:
+                stage = (prog or {}).get("stage", "处理中")
+                label = f'⚙️ {stage} · 已 {elapsed}'
+                bar = _bar_html(8, faint=True)
+        elif status == "done":
+            label = "✅ 完成"
+            bar = _bar_html(100, done=True)
+        elif status == "failed" and j.get("message"):
             label = f'❌ 失败：{_html.escape(j["message"][:40])}'
         rows.append(
             f'<div class="nk-doc-row"><span class="nk-doc-title">{_html.escape(j["name"])}</span>'
-            f'<span class="nk-doc-meta">{label}</span></div>')
+            f'<span class="nk-doc-meta">{label}</span></div>' + bar)
     act = ingest_queue.active_count()
     head = (f'<div class="nk-sec">上传任务（{act} 个进行中 · CPU 嵌向量，大文件数分钟属正常）</div>'
             if act else '<div class="nk-sec">上传任务</div>')
@@ -480,6 +555,7 @@ def do_error_lookup(code, request: gr.Request = None):
     code = (code or "").strip()
     if not code:
         return "输入一个错误码，如 `E-5301`。"
+    _track(request, "错误码")
     from src import acl
     _tok = None
     try:
@@ -525,7 +601,11 @@ def do_worklog_recent(days):
         return "未配置 FEISHU_WORKLOG_URL。"
     try:
         import feishu_client
-        wl = feishu_client.fetch_worklog(url)
+        from src.util_timeout import call_with_timeout
+        _TIMEOUT = object()
+        wl = call_with_timeout(lambda: feishu_client.fetch_worklog(url), 60, on_timeout=_TIMEOUT)
+        if wl is _TIMEOUT:
+            return "⏱️ 读取飞书日志超时（>60s），可能网络或 token 问题，请稍后重试。"
     except Exception as e:
         return f"读取飞书日志失败：{e}\n（若 token 过期，请在本机重跑 feishu_auth.py login）"
     ds = wl.get("days") or []
@@ -537,14 +617,159 @@ def do_worklog_recent(days):
     return head + "\n\n---\n\n" + "\n\n---\n\n".join(d["text"] for d in sel)
 
 
-with gr.Blocks(title="Nikon Expert") as demo:
+# ══════════════════════════════════════════════════════════════════
+# 界面资源（Claude 风格主题 · 侧栏 · 图标）—— 结构对齐 demo_app.py
+# ══════════════════════════════════════════════════════════════════
+_UI_DIR = _Path(__file__).parent
+_NK_CSS = (_UI_DIR / "nikon_expert.css").read_text(encoding="utf-8")
+_FAVICON = str(_UI_DIR / "ne_kaushan.svg")
+
+# 品牌 logo：NE 毛笔字标（Kaushan，已转曲线），ne_kaushan.svg 的内嵌版
+_LOGO_SVG = (_UI_DIR / "ne_kaushan.svg").read_text(encoding="utf-8").replace(
+    'width="64" height="64"', 'class="nk-logo" width="26" height="26"')
+
+# 收起按钮：用 preview 那个「面板图标」，不用 Gradio 的三角（三角在 CSS 里藏掉，点这个触发折叠）
+_COLLAPSE_SVG = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" '
+                 'stroke-linecap="round" stroke-linejoin="round">'
+                 '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>')
+# 内联 onclick 直接触发 Gradio 侧栏折叠(不依赖 demo.load 的 JS 是否加载，6.9 也稳)
+_COLLAPSE_JS = ("var t=document.querySelector('#nk-side-wrap .toggle-button')"
+                "||document.querySelector('.toggle-button');if(t){t.click();}")
+# 展开:仅在折叠态点 NE 图标才展开(展开态点 logo 不误收)
+_EXPAND_JS = ("var s=document.querySelector('#nk-side-wrap');"
+              "if(s&&!s.classList.contains('open')){"
+              "var t=document.querySelector('#nk-side-wrap .toggle-button')"
+              "||document.querySelector('.toggle-button');if(t){t.click();}}")
+_SIDE_TOP = (f'<div id="nk-side" style="padding:14px 12px 0;"><div class="nk-side-top">'
+             f'<span class="nk-logobtn" title="展开" onclick="{_EXPAND_JS}">{_LOGO_SVG}</span>'
+             f'<span class="nk-name">Nikon Expert</span>'
+             f'<button class="nk-collapse" type="button" title="收起" '
+             f'onclick="{_COLLAPSE_JS}">{_COLLAPSE_SVG}</button>'
+             f'</div></div>')
+_SIDE_RECENT = ('<div id="nk-side" style="padding:6px 12px 0;"><div class="nk-recent">'
+                '<div class="nk-recent-head">最近</div>'
+                '<a class="nk-recent-item">S207 对准误差排查</a>'
+                '<a class="nk-recent-item">E-2041 报错含义</a>'
+                '<a class="nk-recent-item">overlay baseline 校正</a>'
+                '<a class="nk-recent-item">reticle stage 清洁步骤</a></div></div>')
+_TOOLS = ('<div class="nk-tools">'
+          '<span class="nk-pill">知识库检索 <code>nikon_query</code></span>'
+          '<span class="nk-pill">错误码 <code>search_error_code</code></span>'
+          '<span class="nk-pill">WPS 实时 <code>ask_wps</code></span>'
+          '<span class="nk-pill">工作日志 <code>query_worklog</code></span></div>')
+
+
+def _account_html(name="王景", role="标定安装工程师"):
+    initial = _html.escape((name or "工")[0])
+    return (f'<div id="nk-side" style="padding:0 12px 12px;"><div class="nk-account">'
+            f'<div class="nk-avatar">{initial}</div><div class="nk-acc-info">'
+            f'<span class="nk-acc-name">{_html.escape(name)}</span>'
+            f'<span class="nk-acc-role">{_html.escape(role)}</span></div>'
+            f'<div class="nk-acc-more">⋯</div></div></div>')
+
+
+def _maintop_html():
+    try:
+        s = backend.db_status()
+        pts = s.get("points", 0) if isinstance(s, dict) else 0
+        ok = isinstance(s, dict) and s.get("status") == "ok"
+    except Exception:
+        pts, ok = 0, False
+    try:
+        model = backend.get_current_model()
+    except Exception:
+        model = os.getenv("LLM_MODEL", "")
+    return (f'<div id="nk-maintop" style="display:flex;justify-content:space-between;'
+            f'align-items:center;padding:14px 4px 4px;">'
+            f'<span class="nk-tagline">光刻机设备知识库 · 按权限可见</span>'
+            f'<span class="nk-status" style="font-family:var(--nk-mono);font-size:.68rem;'
+            f'color:var(--nk-ink-faint);display:inline-flex;align-items:center;gap:6px;">'
+            f'<span class="dot" style="width:6px;height:6px;border-radius:50%;'
+            f'background:{"#6FAE8E" if ok else "#C0705C"};"></span>'
+            f'{_html.escape(str(model))} · {pts:,} vectors · {"online" if ok else "offline"}</span></div>')
+
+
+# 答案内 Markdown 表格美化（【参数速查】【按机型区分】等）——配主题陶土色
+_TABLE_CSS = """
+.message.bot table, .message-row.bot-row .message table {
+  width:100%; border-collapse:separate !important; border-spacing:0 !important;
+  margin:.85em 0 !important; font-size:.88rem !important;
+  border:1px solid var(--nk-line) !important; border-radius:10px !important;
+  overflow:hidden !important; background:var(--nk-surface) !important;
+  box-shadow:0 1px 3px rgba(43,43,38,.05);
+}
+.message.bot thead th, .message-row.bot-row thead th {
+  background:var(--nk-clay-soft) !important; color:var(--nk-ink) !important;
+  font-weight:600 !important; text-align:left !important; padding:9px 14px !important;
+  border:none !important; border-bottom:1px solid var(--nk-line) !important;
+  white-space:nowrap; letter-spacing:.01em;
+}
+.message.bot tbody td, .message-row.bot-row tbody td {
+  padding:8px 14px !important; border:none !important;
+  border-bottom:1px solid var(--nk-line) !important;
+  color:var(--nk-ink) !important; vertical-align:top; line-height:1.55;
+}
+.message.bot tbody tr:last-child td { border-bottom:none !important; }
+.message.bot tbody tr:nth-child(even) td { background:rgba(120,80,60,.035) !important; }
+.dark .message.bot tbody tr:nth-child(even) td { background:rgba(255,255,255,.035) !important; }
+.message.bot tbody tr:hover td { background:var(--nk-clay-soft) !important; }
+.message.bot table code { font-family:var(--nk-mono) !important; font-size:.82rem !important; }
+@media (max-width:640px){ .message.bot table { font-size:.8rem !important; }
+  .message.bot thead th, .message.bot tbody td { padding:6px 9px !important; } }
+"""
+
+# 参考来源按钮条（引用跳原文）
+CITATION_CSS = """
+.citation-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 4px;
+    border-top: 1px solid #e0e0e0;
+}
+.cite-label {
+    font-size: 12px;
+    color: #888;
+    flex-shrink: 0;
+}
+.cite-link {
+    font-size: 12px;
+    color: #2a6cb6;
+    text-decoration: none;
+    padding: 2px 8px;
+    border: 1px solid #c5ddf0;
+    border-radius: 10px;
+    background: #f0f6ff;
+    white-space: nowrap;
+}
+.cite-link:hover {
+    background: #dbe8f8;
+    border-color: #4a90d9;
+}
+.cite-text {
+    font-size: 12px;
+    color: #666;
+}
+"""
+
+_FULL_CSS = _NK_CSS + "\n" + _TABLE_CSS + "\n" + CITATION_CSS
+
+
+# ══════════════════════════════════════════════════════════════════
+# 界面布局（对齐 demo_app.py：侧栏折叠 + 真视图切换）
+# ══════════════════════════════════════════════════════════════════
+with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launch() 传，见文件末
+    # ── 侧栏（gr.Sidebar 自带折叠按钮，手机上自动收成抽屉） ──
     with gr.Sidebar(elem_id="nk-side-wrap", width=280, open=True):
         gr.HTML(_SIDE_TOP)
-        new_btn  = gr.Button("＋ 新建对话", elem_classes=["nk-newbtn"])
-        nav_chat = gr.Button("💬 对话", elem_classes=["nk-navbtn", "nk-navbtn-active"])
-        nav_kb   = gr.Button("📖 知识库", elem_classes=["nk-navbtn"])
-        nav_log  = gr.Button("📋 工作日志", elem_classes=["nk-navbtn"])
-        nav_err  = gr.Button("⚠ 错误码速查", elem_classes=["nk-navbtn"])
+        # 导航图标不用 emoji：gr.Button 放不了 SVG，改用 CSS mask 注入线条图标（见 nikon_expert.css）
+        new_btn   = gr.Button("新建对话", elem_classes=["nk-newbtn", "nk-ic-plus"])
+        nav_chat  = gr.Button("对话", elem_classes=["nk-navbtn", "nk-ic-chat", "nk-navbtn-active"])
+        nav_kb    = gr.Button("知识库", elem_classes=["nk-navbtn", "nk-ic-kb"])
+        nav_log   = gr.Button("工作日志", elem_classes=["nk-navbtn", "nk-ic-log"])
+        nav_err   = gr.Button("错误码速查", elem_classes=["nk-navbtn", "nk-ic-err"])
+        nav_admin = gr.Button("审计", elem_classes=["nk-navbtn", "nk-ic-audit"], visible=False)
         gr.HTML(_SIDE_RECENT)
         gr.HTML(_account_html())
 
@@ -552,9 +777,11 @@ with gr.Blocks(title="Nikon Expert") as demo:
 
     # ── 视图：对话 ──
     with gr.Column(visible=True) as view_chat:
-        chatbot = gr.Chatbot(height=460, show_label=False, elem_classes="chatbot",
-                             value=[{"role": "assistant",
-                                     "content": "机台知识库已就绪。问我错误码、对准、传送方式或工作日志。"}])
+        # gradio 6：Chatbot 只支持 messages 格式（不再有 type= 参数），value 用 role/content 字典
+        chatbot = gr.Chatbot(
+            height=460, show_label=False, elem_classes="chatbot",
+            value=[{"role": "assistant",
+                    "content": "机台知识库已就绪。问我错误码、对准、传送方式或工作日志。"}])
         with gr.Row(elem_id="nk-inputrow"):
             question = gr.Textbox(placeholder="给 Nikon Expert 发消息…", show_label=False,
                                   lines=1, max_lines=6, scale=12, container=False)
@@ -571,7 +798,7 @@ with gr.Blocks(title="Nikon Expert") as demo:
             switch_btn = gr.Button("切换大脑", size="sm")
             switch_status = gr.Markdown("")
 
-    # ── 视图：知识库（真组件）──
+    # ── 视图：知识库（真组件，接后端）──
     with gr.Column(visible=False, elem_id="nk-kb") as view_kb:
         gr.HTML('<div class="nk-view" style="margin-bottom:0;"><h2>知识库</h2>'
                 '<div class="nk-view-sub">手册与经验笔记 · 上传即定级即可查</div></div>')
@@ -579,14 +806,17 @@ with gr.Blocks(title="Nikon Expert") as demo:
         kb_files = gr.File(label="选择文件（PDF / Markdown）", file_count="multiple",
                            file_types=[".pdf", ".md"], type="filepath")
         kb_mode = gr.Radio(
-            ["☁️ 云端向量化（这里传，服务器后台慢慢嵌，不用等）",
-             "🖥 本地向量化（用你 Mac 算力，快；需在 Mac 上开工具）"],
-            value="☁️ 云端向量化（这里传，服务器后台慢慢嵌，不用等）",
-            label="向量化方式")
+            ["☁️ 云端 API（快，文本发给硅基流动云端）",
+             "🖥 服务器本地模型（文本不外传服务器，服务器 CPU，较慢）",
+             "💻 我的 Mac 算力（经 Tailscale 借 Mac 的 GPU，需 Mac 开着嵌入服务）"],
+            value="☁️ 云端 API（快，文本发给硅基流动云端）",
+            label="向量化方式（三种向量互相兼容，可混用）")
+        gr.HTML('<div class="nk-view-sub" style="margin:2px 0 8px;">'
+                '下方任务面板有实时进度条，完成后自动排到文档表第一行并标 🆕。</div>')
         kb_upload_btn = gr.Button("上传并向量化", variant="primary")
         ingest_status = gr.Markdown("")
         jobs_html = gr.HTML("")
-        jobs_timer = gr.Timer(3)   # 后台任务进度轮询
+        jobs_timer = gr.Timer(1.5)   # 后台任务进度轮询（1.5s 让"已 Xs"计时器持续跳动）
 
         gr.HTML('<div class="nk-sec">导入 OKF 知识库</div>')
         with gr.Row():
@@ -637,14 +867,32 @@ with gr.Blocks(title="Nikon Expert") as demo:
             err_btn = gr.Button("查询", variant="primary", scale=2)
         err_out = gr.Markdown("")
 
-    # ── 事件 ──
-    _views = [view_chat, view_kb, view_log, view_err]
-    _navs = [nav_chat, nav_kb, nav_log, nav_err]
+    # ── 视图：审计（仅管理员，导航按钮默认隐藏，登录后由 _reveal_admin 放出）──
+    with gr.Column(visible=False) as view_admin:
+        gr.HTML('<div class="nk-view" style="margin-bottom:0;"><h2>🛡 审计</h2>'
+                '<div class="nk-view-sub">登录/使用记录 · 来源 IP 与归属地 · 用户权限（仅管理员可见）</div></div>')
+        admin_refresh_btn = gr.Button("刷新", variant="primary")
+        admin_status = gr.Markdown("")
+        gr.HTML('<div class="nk-sec first">用户权限</div>')
+        admin_perms = gr.Dataframe(headers=["用户", "角色", "密级", "归属域", "状态"],
+                                   interactive=False, wrap=True)
+        gr.HTML('<div class="nk-sec">登录 / 使用记录（最近 200 条）</div>')
+        admin_log = gr.Dataframe(headers=["时间", "用户", "操作", "IP", "归属地", "结果", "设备"],
+                                 interactive=False, wrap=True)
+
+    # ── 事件绑定 ──
+    _views = [view_chat, view_kb, view_log, view_err, view_admin]
+    _navs = [nav_chat, nav_kb, nav_log, nav_err, nav_admin]
     _nav_out = _views + _navs
     nav_chat.click(lambda: _switch_view("chat"), None, _nav_out)
     nav_kb.click(lambda: _switch_view("kb"), None, _nav_out)
     nav_log.click(lambda: _switch_view("worklog"), None, _nav_out)
     nav_err.click(lambda: _switch_view("err"), None, _nav_out)
+    nav_admin.click(lambda: _switch_view("admin"), None, _nav_out).then(
+        do_admin_report, None, [admin_status, admin_perms, admin_log])
+    admin_refresh_btn.click(do_admin_report, None, [admin_status, admin_perms, admin_log])
+    # 对齐 preview:侧栏只保留 4 项,审计不在导航里显示(视图/权限逻辑保留,日后需要可放开下一行)
+    # demo.load(_reveal_admin, None, [nav_admin])
     new_btn.click(lambda: _switch_view("chat") + [[], "", ""],
                   None, _nav_out + [chatbot, question, citation_buttons])
 
@@ -653,7 +901,7 @@ with gr.Blocks(title="Nikon Expert") as demo:
     provider_dropdown.change(do_switch_provider, [provider_dropdown], [model_dropdown, switch_status])
     switch_btn.click(do_apply_model, [provider_dropdown, model_dropdown], [switch_status])
 
-    kb_upload_btn.click(do_ingest_files, [kb_files, kb_mode], [ingest_status])
+    kb_upload_btn.click(do_ingest_files, [kb_files, kb_mode], [ingest_status, jobs_html])
     jobs_timer.tick(_tick_jobs, None, [jobs_html, kb_table])
     okf_import_btn.click(do_okf_import, [okf_dir_input], [okf_status_md])
     fts_index_btn.click(do_fts_index, [fts_dir_input, fts_pattern], [fts_status_md])
@@ -665,11 +913,8 @@ with gr.Blocks(title="Nikon Expert") as demo:
     err_btn.click(do_error_lookup, [err_code], [err_out])
     err_code.submit(do_error_lookup, [err_code], [err_out])
 
-    # 页面加载：手机点导航后自动收起抽屉；清掉可能残留的折叠状态（旧版本遗留）
+    # 页面加载：手机点导航后自动收起抽屉
     demo.load(js="""() => {
-      try { localStorage.removeItem('nk_rail'); } catch(e){}
-      const sb = document.querySelector('#nk-side-wrap');
-      if (sb) sb.classList.remove('nk-rail');
       function closeDrawer() {
         if (window.innerWidth > 640) return;
         const mt = document.querySelector('.menu-toggle-button');
@@ -677,6 +922,7 @@ with gr.Blocks(title="Nikon Expert") as demo:
       }
       document.body.addEventListener('click', (e) => {
         if (e.target.closest('.nk-navbtn, .nk-newbtn')) setTimeout(closeDrawer, 90);
+        // 注意:收起按钮 .nk-collapse 的折叠由其内联 onclick 处理,这里不再重复(否则触发两次=没动)
       }, true);
     }""")
 
@@ -686,6 +932,7 @@ import pathlib as _pl
 
 def _register_routes(fastapi_app):
     from fastapi.responses import FileResponse, PlainTextResponse, HTMLResponse
+
 
     @fastapi_app.get("/serve-pdf")
     async def serve_pdf(path: str):
@@ -776,10 +1023,10 @@ if __name__ == "__main__":
     probe_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
     url = f"http://{host}:{port}"
 
+    # gradio 6：theme / css 在 launch() 传（不再放 Blocks 构造器）
     launch_kwargs = {"server_name": host, "server_port": port, "share": False,
                      "prevent_thread_lock": True, "theme": nikon_theme,
-                     "css": _NK_CSS + "\n" + _TABLE_CSS + "\n" + CITATION_CSS,
-                     "favicon_path": _FAVICON}
+                     "css": _FULL_CSS, "favicon_path": _FAVICON}
     # 登录：security 开启 → 逐人校验 users 表(per-user 身份，驱动 ACL)；
     #       否则回退单一共享账号 GRADIO_AUTH(向后兼容)。
     from src import acl
@@ -787,7 +1034,13 @@ if __name__ == "__main__":
         def _multi_user_auth(username, password):
             try:
                 from src.fulltext import _get_conn
-                return acl.verify_login(username, password, _get_conn())
+                ok = acl.verify_login(username, password, _get_conn())
+                try:
+                    from src import audit
+                    audit.log(username or "?", "登录" if ok else "登录失败", ok=bool(ok))
+                except Exception:
+                    pass
+                return ok
             except Exception:
                 return False
         launch_kwargs["auth"] = _multi_user_auth

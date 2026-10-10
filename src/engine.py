@@ -37,12 +37,27 @@ def _init_engine():
     top_k         = int(os.getenv("RETRIEVAL_TOP_K", "8"))
     rerank_top_n  = int(os.getenv("RERANK_TOP_N", "4"))
 
-    print(f"⚙️  加载 Embedding 模型：{embed_path}")
-    Settings.embed_model = HuggingFaceEmbedding(
-        model_name=embed_path,
-        max_length=512,
-        device=get_device(),
-    )
+    # Embedding：设了 EMBED_API_KEY 默认走云端 BGE-M3 API（快、省内存，向量兼容）；
+    # 否则本地 BGE-M3（零外传）。摄入子进程可用 env INGEST_EMBED=local/api 逐次覆盖
+    # （上传页「向量化方式」开关，两种都在服务器跑，向量同空间兼容）。
+    _has_key = bool(os.getenv("EMBED_API_KEY", "").strip())
+    _choice = os.getenv("INGEST_EMBED", "").strip().lower()
+    _use_api = _has_key
+    if _choice == "local":
+        _use_api = False
+    elif _choice == "api":
+        _use_api = _has_key   # 选了 API 但没配 key → 退回本地
+    if _use_api:
+        from src.api_embedding import APIEmbedding
+        Settings.embed_model = APIEmbedding()
+        print(f"⚙️  Embedding：云端 API（{Settings.embed_model.model_name}）—— 不吃本地 CPU")
+    else:
+        print(f"⚙️  加载 Embedding 模型（服务器本地）：{embed_path}")
+        Settings.embed_model = HuggingFaceEmbedding(
+            model_name=embed_path,
+            max_length=512,
+            device=get_device(),
+        )
 
     # 启动默认 LLM：LLM_PROVIDER 指定云端 provider（如 deepseek）时用它，否则本地 Ollama。
     # 云端部署（无本地 Ollama）靠这个默认到可用的 API。
@@ -203,6 +218,26 @@ def ingest_file(file_path: str) -> dict:
     return result
 
 
+def _embed_nodes_batched(nodes, ctx, doc_name: str, batch: int = 64):
+    """分批嵌入并写库，每批上报进度（供 UI 渲染真实进度条）。
+    token 来自摄入子进程的环境变量 INGEST_PROGRESS_TOKEN（=ingest_queue job id）。
+    分批用 index.insert_nodes；首批用构造函数（沿用原有验证过的路径）。"""
+    from llama_index.core import VectorStoreIndex
+    from src import ingest_progress as _p
+    token = os.getenv("INGEST_PROGRESS_TOKEN")
+    total = len(nodes)
+    if total == 0:
+        return
+    _p.write(token, "嵌入向量", 0, total)
+    first = nodes[:batch]
+    index = VectorStoreIndex(first, storage_context=ctx, show_progress=False)
+    _p.write(token, "嵌入向量", min(batch, total), total)
+    for i in range(batch, total, batch):
+        index.insert_nodes(nodes[i:i + batch])
+        _p.write(token, "嵌入向量", min(i + batch, total), total)
+    _p.write(token, "写入完成", total, total)
+
+
 def _ingest_md_file(eng, path: Path, rid: str, doc_name: str) -> dict:
     import hashlib
     from llama_index.core import VectorStoreIndex, Document, StorageContext
@@ -242,7 +277,7 @@ def _ingest_md_file(eng, path: Path, rid: str, doc_name: str) -> dict:
 
     vs = QdrantVectorStore(client=eng["client"], collection_name=eng["collection"])
     ctx = StorageContext.from_defaults(vector_store=vs)
-    VectorStoreIndex(nodes, storage_context=ctx, show_progress=False)
+    _embed_nodes_batched(nodes, ctx, doc_name)
     return {"success": True, "message": f"✅ 摄入完成：**{doc_name}**（{len(nodes)} chunks）", "chunks": len(nodes)}
 
 
@@ -253,7 +288,9 @@ def _ingest_pdf_file(eng, path: Path, rid: str, doc_name: str) -> dict:
     from llama_index.core.node_parser import SentenceSplitter
     from llama_index.vector_stores.qdrant import QdrantVectorStore
     from src.ingestor import _split_by_headings, _chunk_hash
+    from src import ingest_progress as _p
 
+    _p.write(os.getenv("INGEST_PROGRESS_TOKEN"), "解析 PDF", 0, 0)
     pages = pymupdf4llm.to_markdown(str(path), page_chunks=True)
     full_text = ""
     page_map = {}
@@ -275,6 +312,7 @@ def _ingest_pdf_file(eng, path: Path, rid: str, doc_name: str) -> dict:
                 best = pg
         return best
 
+    _p.write(os.getenv("INGEST_PROGRESS_TOKEN"), "切块中", 0, 0)
     sections = _split_by_headings(full_text, max_chunk=1024)
     child_splitter = SentenceSplitter(chunk_size=256, chunk_overlap=32)
     all_nodes = []
@@ -309,7 +347,7 @@ def _ingest_pdf_file(eng, path: Path, rid: str, doc_name: str) -> dict:
 
     vs = QdrantVectorStore(client=eng["client"], collection_name=eng["collection"])
     ctx = StorageContext.from_defaults(vector_store=vs)
-    VectorStoreIndex(all_nodes, storage_context=ctx, show_progress=False)
+    _embed_nodes_batched(all_nodes, ctx, doc_name)
     return {"success": True, "message": f"✅ 摄入完成：**{doc_name}**（{len(all_nodes)} chunks）", "chunks": len(all_nodes)}
 
 
