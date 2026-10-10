@@ -395,6 +395,32 @@ def ingest_okf(path: str, limit: int = 0, storage=None) -> int:
 _BLANK_MARKERS = ("intentionally left blank", "このページは空白")
 
 
+def _ocr_page_tokens(page) -> str:
+    """电路图上竖排的接插件/针脚/基板名多是 CAD 笔画字，不在文字层；
+    渲染后按 CIRCUIT_OCR_ROTATIONS 旋转做 OCR，只留 diagram_config 能认的编号。"""
+    import shutil, subprocess, tempfile
+    if os.getenv("CIRCUIT_OCR", "1").lower() in ("0", "false", "no") or not shutil.which("tesseract"):
+        return ""
+    from PIL import Image
+    from src import diagram_config as C
+    dpi = int(os.getenv("CIRCUIT_OCR_DPI", "400"))
+    rots = [int(r) for r in os.getenv("CIRCUIT_OCR_ROTATIONS", "270").split(",") if r.strip()]
+    toks = set()
+    with tempfile.TemporaryDirectory() as td:
+        png = Path(td) / "p.png"
+        page.get_pixmap(dpi=dpi).save(str(png))
+        for r in rots:
+            f = png
+            if r % 360:
+                f = Path(td) / f"r{r}.png"
+                Image.open(png).rotate(r, expand=True).save(f)
+            out = subprocess.run(["tesseract", str(f), "-", "--psm", "11", "-l", "eng"],
+                                 capture_output=True, text=True, timeout=300).stdout
+            for _, pat in C.IDENTIFIER_PATTERNS:
+                toks |= {m.upper() for m in pat.findall(out) if len(m) >= C.MIN_TOKEN_LEN}
+    return " ".join(sorted(toks))
+
+
 def ingest_circuit_pdf(pdf_path: str, machine_model: str = "", limit: int = 0,
                        vector: bool = False) -> int:
     """把大型电路图 PDF 的文字逐页写入 FTS（可选同时向量化，支持中文跨语言检索）。
@@ -442,6 +468,9 @@ def ingest_circuit_pdf(pdf_path: str, machine_model: str = "", limit: int = 0,
         low = text.lower()
         if any(m in low for m in _BLANK_MARKERS) and len(text) < 200:
             continue
+        ocr = _ocr_page_tokens(docpdf[i])
+        if ocr:
+            text = text + "\n【OCR标签】" + ocr
         page = i + 1
         ingest_fts(
             f"{rid}_{page}", doc_name, "circuit_diagram", machine_model,
