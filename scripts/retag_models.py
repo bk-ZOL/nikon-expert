@@ -31,7 +31,12 @@ for name, dtype, cur in con.execute(f"select doc_name, doc_type, max(machine_mod
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue, FilterSelector
-qc = QdrantClient(url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333"))
+qc = QdrantClient(url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333"), timeout=300)
+try:   # doc_name 建索引：按文档名改/删不再全表扫描（同步删旧数据也受益）
+    qc.create_payload_index(COL, field_name="doc_name", field_schema="keyword", wait=True)
+    print("✓ doc_name 索引已就绪", flush=True)
+except Exception as e:
+    print(f"（doc_name 索引：{e}）", flush=True)
 off = None
 while True:
     pts, off = qc.scroll(COL, with_payload=["doc_name", "doc_type", "machine_model"],
