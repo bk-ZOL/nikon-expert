@@ -71,12 +71,9 @@ def pdf_path(doc):
     if _mirror is None:
         _mirror = {p.name: str(p) for p in Path("data/kwiki_mirror").rglob("*.pdf")}
     path = _mirror.get(doc)
-    if not path:
-        c = fts()
-        tbls = {r[0] for r in c.execute("select name from sqlite_master where type='table'")}
-        tbl = "doc_fts" if "doc_fts" in tbls else next(t for t in tbls if "fts" in t)
-        r = c.execute(f"select file_path from {tbl} where doc_name=? and file_path!='' limit 1", (doc,)).fetchone()
-        path = r[0] if r else None
+    if not path:                      # 手工放进 data/ 的（如"已融合"版电路图）
+        hit = [p for p in Path("data").rglob("*.pdf") if p.name == doc and "kwiki_mirror" not in str(p)]
+        path = str(hit[0]) if hit else None
     if not path or not Path(path).exists():
         raise SystemExit(f"❌ 找不到 PDF：{doc}")
     _paths[doc] = path
