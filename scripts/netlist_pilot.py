@@ -24,7 +24,7 @@ OUT = Path("data/netlist_pilot")
 CLIENT = httpx.Client(timeout=300, trust_env=False)
 
 PROMPT = """这是 Nikon NSR 光刻机电路图中的一页配线图（Wiring Diagram / 配線図）。
-请把图上每一根线缆（cable / harness）的连接关系抄出来，只输出 JSON，不要任何解释。
+请把图上每一根线缆（cable / harness）的连接关系抄出来，只输出一行紧凑的 JSON（不要缩进、不要换行、不要 ``` 代码块），不要任何解释。
 
 格式：
 {
@@ -35,7 +35,7 @@ PROMPT = """这是 Nikon NSR 光刻机电路图中的一页配线图（Wiring Di
       "a": {"connector": "线缆这一端的接插件，如 J1394G", "mate": "它插在设备上的对插接插件，如 P1394A；没有就空串",
             "device": "这一端连接的设备/基板/单元名称，如 Robot Controller", "device_no": "设备型号，如 4S064-563", "ref": "单元号，如 A-131"},
       "b": {"connector": "", "mate": "", "device": "", "device_no": "", "ref": ""},
-      "wires": "芯数或针脚范围，如 34 芯 / 1~20；看不清就空串",
+      "wires": "针脚范围，照图上原样写，如 A1~B6 / 1~36 / ①~⑥；不要自己数芯数；看不清就空串",
       "note": "备注，如跨页引用 →No.3"
     }
   ],
@@ -97,7 +97,7 @@ def render(pdf, page_no, long_side=2400):
 
 def ask(model, img_b64, hints):
     body = {
-        "model": model, "temperature": 0, "max_tokens": 4096,
+        "model": model, "temperature": 0, "max_tokens": 12000,
         "messages": [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}", "detail": "high"}},
             {"type": "text", "text": PROMPT.replace("{hints}", hints[:3000])},
