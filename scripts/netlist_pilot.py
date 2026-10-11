@@ -99,10 +99,12 @@ def ask(model, img_b64, hints):
     body = {
         "model": model, "temperature": 0, "max_tokens": 4096,
         "messages": [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}", "detail": "high"}},
             {"type": "text", "text": PROMPT.replace("{hints}", hints[:3000])},
         ]}],
     }
+    if "Qwen3.5" in model or "Thinking" not in model and "Qwen3" in model:
+        body["enable_thinking"] = False          # 抄图不需要思考模式，省 token
     delay = 3
     for attempt in range(6):
         try:
@@ -111,6 +113,8 @@ def ask(model, img_b64, hints):
             if r.status_code == 200:
                 j = r.json()
                 return j["choices"][0]["message"]["content"], j.get("usage", {})
+            if r.status_code == 402:
+                sys.exit(f"\n❌ 账户余额不足（402），已停止。充值后重跑即可。")
             if r.status_code in (429, 500, 502, 503, 504):
                 print(f"    ⏳ {r.status_code}，{delay}s 后重试", flush=True)
             else:
@@ -122,7 +126,9 @@ def ask(model, img_b64, hints):
 
 
 def parse(text):
-    m = re.search(r"\{.*\}", text or "", re.S)
+    if not text or text.startswith("__ERROR__"):
+        return None
+    m = re.search(r"\{.*\}", text, re.S)
     if not m:
         return None
     try:
@@ -144,7 +150,9 @@ def run(model, doc, path, pages, get_page_text, summary):
         (d / f"p{n}.json").write_text(json.dumps({"page": n, "raw": raw, "data": data}, ensure_ascii=False, indent=1))
         conns = (data or {}).get("connections", []) if isinstance(data, dict) else []
         ok += bool(data)
-        print(f"  {model.split('/')[-1]}  第{n}页  {'✓' if data else '✗'}  {len(conns)} 条连接", flush=True)
+        mark = "✓" if data else ("✗ " + raw[:80] if raw.startswith("__ERROR__") else "✗ 解析失败")
+        print(f"  {model.split('/')[-1]}  第{n}页  {mark}  {len(conns)} 条连接  "
+              f"(in {usage.get('prompt_tokens', 0)} / out {usage.get('completion_tokens', 0)})", flush=True)
         summary.append(f"\n## {model} · 第 {n} 页 · {(data or {}).get('figure_title', '') if isinstance(data, dict) else ''}")
         for c in conns:
             a, b = c.get("a", {}) or {}, c.get("b", {}) or {}
