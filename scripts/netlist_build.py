@@ -150,14 +150,16 @@ def _claude_req(doc, page, hints):
         {"type": "text", "text": N.PROMPT.replace("{hints}", hints[:3000])}]}]}
 
 
-def cmd_claude_submit(chunk=60):
+def cmd_claude_submit(chunk=60, kind="general_wiring", redo=""):
     from src.diagram_index import get_page_text
     if not AKEY:
         sys.exit("❌ .env 里没有 ANTHROPIC_API_KEY")
     con = db(); done = done_pages(con)
     batches = json.loads(BATCH_FILE.read_text()) if BATCH_FILE.exists() else []
     inflight = {tuple(v[:2]) for b in batches if not b.get("collected") for v in b["map"].values()}
-    todo = [x for x in targets() if x[2] == "general_wiring"
+    if redo:   # 把某个模型抽过的页当作待重抽（如 --redo Qwen）
+        done -= {(d, p) for d, p in con.execute("select doc_name, page from pages where model like ?", (f"%{redo}%",))}
+    todo = [x for x in targets() if x[2] == kind
             and (x[0], x[1]) not in done and (x[0], x[1]) not in inflight]
     print(f"Claude 待提交 {len(todo)} 页（每批 {chunk} 页），模型 {CLAUDE}", flush=True)
     client = httpx.Client(timeout=600)
@@ -171,7 +173,7 @@ def cmd_claude_submit(chunk=60):
         if r.status_code != 200:
             sys.exit(f"❌ 提交失败 {r.status_code}: {r.text[:300]}")
         bid = r.json()["id"]
-        batches.append({"id": bid, "submitted_at": NOW(), "map": mp})
+        batches.append({"id": bid, "submitted_at": NOW(), "model": CLAUDE, "map": mp})
         BATCH_FILE.write_text(json.dumps(batches, ensure_ascii=False, indent=1))
         print(f"  ✓ 已提交批次 {bid}（{len(part)} 页）", flush=True)
 
@@ -200,11 +202,11 @@ def cmd_claude_collect(interval=120):
                     msg = rr["message"]
                     text = "".join(x.get("text", "") for x in msg.get("content", []) if x.get("type") == "text")
                     u = msg.get("usage", {})
-                    good, _ = save(con, doc, page, kind, CLAUDE, text,
+                    good, _ = save(con, doc, page, kind, b.get("model", CLAUDE), text,
                                    {"prompt_tokens": u.get("input_tokens", 0), "completion_tokens": u.get("output_tokens", 0)})
                 else:
                     good = False
-                    save(con, doc, page, kind, CLAUDE, "__ERROR__ " + json.dumps(rr)[:500], {})
+                    save(con, doc, page, kind, b.get("model", CLAUDE), "__ERROR__ " + json.dumps(rr)[:500], {})
                 ok += good; fail += not good
             b["collected"] = True
             BATCH_FILE.write_text(json.dumps(batches, ensure_ascii=False, indent=1))
@@ -224,6 +226,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["plan", "qwen", "claude-submit", "claude-collect", "stats"])
     ap.add_argument("--workers", type=int, default=3)
+    ap.add_argument("--kind", default="general_wiring")
+    ap.add_argument("--model", default="")
+    ap.add_argument("--redo", default="")
     a = ap.parse_args()
-    {"plan": cmd_plan, "stats": cmd_stats, "claude-submit": cmd_claude_submit,
+    if a.model:
+        CLAUDE = a.model
+    {"plan": cmd_plan, "stats": cmd_stats, "claude-submit": lambda: cmd_claude_submit(kind=a.kind, redo=a.redo),
      "claude-collect": cmd_claude_collect, "qwen": lambda: cmd_qwen(a.workers)}[a.cmd]()
