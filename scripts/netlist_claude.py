@@ -13,7 +13,7 @@ CLIENT = httpx.Client(timeout=300)
 
 
 def ask(model, img_b64, hints):
-    body = {"model": model, "max_tokens": 8000, "temperature": 0,
+    body = {"model": model, "max_tokens": 8000,
             "messages": [{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
                 {"type": "text", "text": N.PROMPT.replace("{hints}", hints[:3000])}]}]}
