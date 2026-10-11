@@ -248,7 +248,7 @@ def get_route_weights(query_type: str) -> tuple:
     return weights.get(query_type, (0.5, 0.5))
 
 
-def merge_results(
+def _merge_results_raw(
     fts_results: list,
     semantic_results: list,
     fts_weight: float = 0.5,
@@ -342,3 +342,18 @@ def merge_results(
         return out
 
     return ranked[:top_n]
+
+
+def merge_results(fts_results, semantic_results, fts_weight=0.5, semantic_weight=0.5,
+                  top_n=6, query="", **kw):
+    """RRF 融合后按机型加权：问题点名机型优先，否则自家机型优先。只降权、不过滤。"""
+    pool = _merge_results_raw(fts_results, semantic_results, fts_weight, semantic_weight,
+                              top_n=max(top_n * 3, top_n + 10), **kw)
+    try:
+        from src.machine_model import model_factor
+        for r in pool:
+            r["score"] = r.get("score", 0) * model_factor(r.get("machine_model", ""), query)
+        pool.sort(key=lambda r: r.get("score", 0), reverse=True)
+    except Exception as e:
+        print(f"⚠️  机型加权跳过: {e}")
+    return pool[:top_n]

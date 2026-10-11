@@ -334,28 +334,39 @@ def _convert_legacy_office(path: Path, suffix: str):
     return out
 
 
+def _model_for(path: Path) -> str:
+    """按 WPS 镜像路径 + 文件名推断机型标签。"""
+    from src.machine_model import infer_model
+    try:
+        rel = str(path.resolve().relative_to(MIRROR.resolve()))
+    except Exception:
+        rel = ""
+    return infer_model(rel, path.name)
+
+
 def ingest_dispatch(local_path: Path, doc_type: str):
     """按后缀 + doc_type 分发到现有摄入管线。"""
     _ensure_embed()
     suffix = local_path.suffix.lower()
+    model = _model_for(local_path)
     local_path = _convert_legacy_office(local_path, suffix)  # 老 .xls/.doc 先转换
     if suffix == ".docx":
         from src.ingest_docx import ingest_docx
-        ingest_docx(str(local_path), doc_type=doc_type, machine_model=MACHINE_MODEL)
+        ingest_docx(str(local_path), doc_type=doc_type, machine_model=model)
     elif suffix == ".pdf":
         if "circuit diagram" in local_path.name.lower():
             from src.ingestor import ingest_circuit_pdf
-            ingest_circuit_pdf(str(local_path), machine_model=MACHINE_MODEL)
+            ingest_circuit_pdf(str(local_path), machine_model=model)
         else:
             from src.ingestor import ingest_pdf
-            ingest_pdf(str(local_path), machine_model=MACHINE_MODEL, language="zh")
+            ingest_pdf(str(local_path), machine_model=model, language="zh")
     elif suffix in (".xlsx", ".csv"):
         if doc_type == "fault_history":
             from src.ingestor import ingest_fault_history
             ingest_fault_history(str(local_path))
         else:
             from src.ingestor import ingest_excel
-            ingest_excel(str(local_path), machine_model=MACHINE_MODEL)
+            ingest_excel(str(local_path), machine_model=model)
     elif suffix in (".md", ".txt"):
         from src.fulltext import index_directory
         index_directory(str(local_path.parent), pattern=local_path.name,
