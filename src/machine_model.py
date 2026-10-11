@@ -26,6 +26,17 @@ LOOSE = [
     ("SF100", re.compile(r"SF\s?1[0-4]0|SF\s?200", re.I)),
 ]
 DIR_FAMILY = {"206": "S206D", "207": "S207D", "307": "S207D", "SF100": "SF100"}
+ORDER = ["COMMON", "S207D", "S206D", "SF100"]          # 标签排列顺序
+
+
+def _common_dirs():
+    """跟机型无关的通用资料所在目录（关键字，逗号分隔）。带 COMMON 标签的文档任何问题都不降权。"""
+    return [d.strip() for d in os.getenv("COMMON_DIRS", "光刻原理").split(",") if d.strip()]
+
+
+def _sort_tags(tags):
+    tags = [t for t in dict.fromkeys(tags) if t]
+    return sorted(tags, key=lambda t: ORDER.index(t) if t in ORDER else len(ORDER))
 
 
 def _default():
@@ -42,11 +53,13 @@ def _families(text, rules=STRICT):
 
 def infer_model(rel_path: str = "", name: str = "") -> str:
     """WPS 路径上最近的机型目录优先；其次文件名；都没有给默认值。"""
+    if any(d in (rel_path or "") for d in _common_dirs()):
+        return "COMMON"
     parts = [p for p in re.split(r"[\\/]", rel_path or "") if p]
     for p in reversed(parts[:-1] if parts else []):
         if p in DIR_FAMILY:
             return DIR_FAMILY[p]
-    found = _families(name)
+    found = _sort_tags(_families(name))
     return ",".join(found) if found else _default()
 
 
@@ -67,8 +80,8 @@ def models_in_query(query: str) -> list:
 
 def model_factor(tags: str, query: str = "") -> float:
     fams = normalize(tags)
-    if not fams:
-        return 1.0                      # 没标签的不动
+    if not fams or "COMMON" in fams:
+        return 1.0                      # 没标签的、通用资料不动
     other = float(os.getenv("OTHER_MODEL_FACTOR", "0.5"))
     want = models_in_query(query)
     if want:
@@ -86,7 +99,7 @@ def infer_model_multi(rel_paths, name: str = "") -> str:
     tags = []
     for rp in (rel_paths or [""]):
         tags.extend(infer_model(rp, name).split(","))
-    tags = [t for t in dict.fromkeys(tags) if t]
+    tags = _sort_tags(tags)
     return ",".join(tags) if tags else _default()
 
 
