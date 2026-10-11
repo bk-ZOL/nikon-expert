@@ -336,12 +336,8 @@ def _convert_legacy_office(path: Path, suffix: str):
 
 def _model_for(path: Path) -> str:
     """按 WPS 镜像路径 + 文件名推断机型标签。"""
-    from src.machine_model import infer_model
-    try:
-        rel = str(path.resolve().relative_to(MIRROR.resolve()))
-    except Exception:
-        rel = ""
-    return infer_model(rel, path.name)
+    from src.machine_model import infer_model_multi, mirror_paths
+    return infer_model_multi(mirror_paths(MIRROR, path.name), path.name)
 
 
 def ingest_dispatch(local_path: Path, doc_type: str):

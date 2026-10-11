@@ -489,7 +489,7 @@ def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
 
     # ── 4. 融合(RRF)：先取较大候选池，再交给 Rerank 精排
     rerank_pool = int(os.getenv("RERANK_POOL", "12"))
-    pool = merge_results(fts_results, semantic_results, fts_w, sem_w, top_n=rerank_pool,
+    pool = merge_results(fts_results, semantic_results, fts_w, sem_w, top_n=rerank_pool, query=question,
                          demote_circuit=not is_circuit_query(question))
 
     # ── 5. Rerank 精排：把语义蹭词但不相关的挤掉，只留最相关的 rerank_top_n 条

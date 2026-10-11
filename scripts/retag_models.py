@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 sys.path.insert(0, ".")
 from dotenv import load_dotenv; load_dotenv(".env")
-from src.machine_model import infer_model
+from src.machine_model import infer_model_multi
 
 try:
     import pysqlite3 as sq
@@ -46,13 +46,13 @@ docs.pop(None, None)
 paths = {}
 for f in MIRROR.rglob("*"):
     if f.is_file() and not f.name.startswith("."):
-        paths.setdefault(f.name, str(f.relative_to(MIRROR)))
+        paths.setdefault(f.name, []).append(str(f.relative_to(MIRROR)))
 
 plan = {}
 for name, (dtype, cur) in docs.items():
     if dtype == "fault_history":
         continue
-    plan[name] = (cur, infer_model(paths.get(name, ""), name))
+    plan[name] = (cur, infer_model_multi(paths.get(name, [""]), name))
 
 cnt = Counter(new for _, new in plan.values())
 print(f"共 {len(plan)} 份文档（不含故障履历）")

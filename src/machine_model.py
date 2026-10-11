@@ -79,3 +79,23 @@ def model_factor(tags: str, query: str = "") -> float:
         if f in prim:
             best = max(best, 1.0 - 0.2 * prim.index(f))
     return best
+
+
+def infer_model_multi(rel_paths, name: str = "") -> str:
+    """同一文件出现在多个机型目录（如 206、307、SF100 各放一份）时，合并各路径的标签。"""
+    tags = []
+    for rp in (rel_paths or [""]):
+        tags.extend(infer_model(rp, name).split(","))
+    tags = [t for t in dict.fromkeys(tags) if t]
+    return ",".join(tags) if tags else _default()
+
+
+def mirror_paths(mirror, name: str) -> list:
+    """镜像目录里所有同名文件的相对路径。"""
+    import os
+    root = str(mirror)
+    out = []
+    for d, _, files in os.walk(root):
+        if name in files:
+            out.append(os.path.relpath(os.path.join(d, name), root))
+    return out
