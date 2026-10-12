@@ -124,12 +124,16 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
 
     def error_code_lookup(code: str) -> str:
         """精确查询某个 Nikon Error Code（如 E-5301、P-12345、ALM-04）的原厂记录与含义。
+        现场写法 STG-29-80（控制器-主码-细分码）会自动换算成手册里的主码 29H / 细分码 80H 并给出原文。
         当故障描述中出现明确的报警码 / error code 时，优先用本工具。
         参数 code: 报警码字符串。"""
         def run():
+            from src.error_code import lookup as _conv
+            conv = _conv(code)
             results = search_fts_exact(code.strip(), limit=6)
             collector.add(results, tool="error_code_lookup")
-            return _format(results, empty=f"知识库中未找到 {code} 的记录。")
+            found = _format(results, empty=f"知识库中未找到 {code} 的记录。")
+            return (f"{conv}\n\n【知识库里提到 {code.strip()} 的记录（履历/日志等）】\n{found}") if conv else found
         return _memo("error_code_lookup", code, run)
 
     def keyword_search(query: str) -> str:

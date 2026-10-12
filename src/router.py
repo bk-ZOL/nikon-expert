@@ -12,7 +12,7 @@ from typing import Optional
 # 否则任何提到机型的问题都会被误判为 troubleshoot→走慢速多步 agent。
 # 真 S 错误码要么带横杠(S-1234)要么 4-5 位数字(S12345)，均不与 3 位机型号冲突。
 ERROR_CODE_RE = re.compile(
-    r'\b([EWC]-?\d{3,5}|S-\d{3,5}|S\d{4,5}|P-\d{4,6}|ALM-\d{2,4}|SYS-\d{2,4})\b',
+    r'\b([EWC]-?\d{3,5}|S-\d{3,5}|S\d{4,5}|P-\d{4,6}|ALM-\d{2,4}|SYS-\d{2,4}|STG-[0-9A-F]{2}(?:-[0-9A-F]{2})?)\b',
     re.IGNORECASE,
 )
 
