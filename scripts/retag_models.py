@@ -2,6 +2,8 @@
 用法:
   .venv/bin/python scripts/retag_models.py          # 只预览
   .venv/bin/python scripts/retag_models.py --apply  # 真正写入
+  加 --content：先读镜像里的文件内容判断机型（与入库同一套规则），判断不出来再按路径/文件名；
+               预览时列出和现有标签不同的文档及判断依据。
 故障履历(fault_history)每行自带机型，不动。
 """
 import os, sys
@@ -9,7 +11,7 @@ from collections import Counter
 from pathlib import Path
 sys.path.insert(0, ".")
 from dotenv import load_dotenv; load_dotenv(".env")
-from src.machine_model import infer_model_multi
+from src.machine_model import infer_model_multi, infer_model_for_file, normalize
 
 try:
     import pysqlite3 as sq
@@ -17,6 +19,7 @@ except Exception:
     import sqlite3 as sq
 
 APPLY = "--apply" in sys.argv
+CONTENT = "--content" in sys.argv
 MIRROR = Path("data/kwiki_mirror")
 COL = os.getenv("COLLECTION_NAME", "nikon_expert_v1")
 
@@ -53,11 +56,23 @@ for f in MIRROR.rglob("*"):
     if f.is_file() and not f.name.startswith("."):
         paths.setdefault(f.name, []).append(str(f.relative_to(MIRROR)))
 
-plan = {}
-for name, (dtype, cur) in docs.items():
+plan, why = {}, {}
+for i, (name, (dtype, cur)) in enumerate(docs.items(), 1):
     if dtype == "fault_history":
         continue
-    plan[name] = (cur, infer_model_multi(paths.get(name, [""]), name))
+    if CONTENT and name in paths:
+        plan[name], why[name] = (lambda t: ((cur, t[0]), t[1]))(
+            infer_model_for_file(MIRROR / paths[name][0], paths[name], name))
+    else:
+        plan[name] = (cur, infer_model_multi(paths.get(name, [""]), name))
+    if CONTENT and i % 100 == 0:
+        print(f"  …已读 {i}/{len(docs)}", flush=True)
+
+if CONTENT:
+    changed = {n: v for n, v in plan.items() if normalize(v[0] or "") != normalize(v[1])}
+    print(f"\n按内容判断后，{len(changed)} 份文档的标签和现在不同：")
+    for n, (cur, new) in sorted(changed.items(), key=lambda kv: (kv[1][1], kv[0])):
+        print(f"  {cur or '(空)':14s} → {new:14s} {n[:70]}\n{'':34s}依据：{why.get(n, '无镜像文件，按路径/文件名')}")
 
 cnt = Counter(new for _, new in plan.values())
 print(f"共 {len(plan)} 份文档（不含故障履历）")

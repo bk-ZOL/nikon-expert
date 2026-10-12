@@ -335,17 +335,19 @@ def _convert_legacy_office(path: Path, suffix: str):
 
 
 def _model_for(path: Path) -> str:
-    """按 WPS 镜像路径 + 文件名推断机型标签。"""
-    from src.machine_model import infer_model_multi, mirror_paths
-    return infer_model_multi(mirror_paths(MIRROR, path.name), path.name)
+    """推断机型标签：先读内容（封面、文档编号、正文出现次数），判断不出来再按 WPS 镜像路径 + 文件名。"""
+    from src.machine_model import infer_model_for_file, mirror_paths
+    tag, why = infer_model_for_file(path, mirror_paths(MIRROR, path.name), path.name)
+    print(f"    机型 {tag}（{why}）")
+    return tag
 
 
 def ingest_dispatch(local_path: Path, doc_type: str):
     """按后缀 + doc_type 分发到现有摄入管线。"""
     _ensure_embed()
     suffix = local_path.suffix.lower()
-    model = _model_for(local_path)
     local_path = _convert_legacy_office(local_path, suffix)  # 老 .xls/.doc 先转换
+    model = _model_for(local_path)
     if suffix == ".docx":
         from src.ingest_docx import ingest_docx
         ingest_docx(str(local_path), doc_type=doc_type, machine_model=model)
