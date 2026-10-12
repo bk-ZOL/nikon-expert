@@ -62,7 +62,13 @@
   - 页面文字从全文索引读，OCR 编号能参与交叉引用，结果里标"（OCR）"。
   - 交叉引用范围是同机型的所有电路图（S206D 4 卷 + SMIF），所查编号的页排最前。
   - **Nikon 图纸在中继面板等处常把接插件号写成不带前缀的 `2613C`**（就是 P2613C）。现在 4 位数字 + 1 个字母的编号统一按 J/P 号处理；`7214A2` 这类网络号不变。
-- **S207D 已融合版（5180 页）没做过 OCR**，现在只有 S206D 4 卷和两份 SMIF Loader 有 OCR 编号。要补的话，服务器只有 2 核，按每页十几秒估，要跑很久。
+- **S207D 已融合版补 OCR**（2026-10-12 开跑，`scripts/ocr_circuit_pages.py`）：不重新入库，只往全文索引每页文字后追加 `【OCR标签】`。
+  - 设置：300 dpi，270° psm 11（竖排）+ 0° psm 11 + 0° psm 6（横排）。实测 300 dpi 比 400 dpi 认得多、还快；只做 270° 时，第 70 页这种横排标注的页一个编号都认不出来。每页约 35 秒。
+  - 按低分辨率渲染图的指纹去重，重复页复用结果；进度存在服务器 `data/ocr_progress_aefde4c1.json`，可以随时 kill，再跑会接着做。
+  - 后台命令：`nohup nice -n 19 .venv/bin/python scripts/ocr_circuit_pages.py --doc 已融合 > /tmp/ocr_s207d.log 2>&1 &`，看进度：`grep -v Warning /tmp/ocr_s207d.log | tail`。
+  - **跑完后要重建编号索引**：`.venv/bin/python scripts/build_diagram_index.py --full`。
+  - OCR 会把 B 认成 8（`J75448` 实为 J7544B），结果里已标"（OCR）"提醒核对。
+  - 入库时的默认 OCR 设置（`CIRCUIT_OCR_DPI=400`、`CIRCUIT_OCR_ROTATIONS=270`）没改，以后新入库的电路图可以考虑也换成这套。
 - **S207D 已融合版在全文索引里记的 `file_path` 是 Mac 上的 `/Users/jayce/Downloads/…`**，服务器上不存在。这导致网页的"看图"和 `trace_connection` 以前在 S207D 主图册上一直查不到。现在 `figures._circuit_pages` 在路径不存在时按文件名到 `data/` 下找，已经能查到。库里的路径也已改正（2026-10-12，`scripts/fix_file_paths.py --apply`，全文索引和向量库一起改，旧路径备份在服务器 `data/file_path_backup_20261012_060920.json`）。同时改了"北京厂内 207调试履历.docx"：WPS 里文件夹从"装机调试履历"改名成了"装机调试报告"，同步按文件 id 判断没变，不会重新入库，路径就留在了旧文件夹。**以后 WPS 里文件夹改名都会出现这种情况**，可以定期跑一次这个脚本（默认只预览）。`CD-SEM 机台操作SOP-CG6300i _v2.md` 是 4 月在网页上传的，原文件已经不在了，路径没法改，内容照常能搜到，只是打不开原文。
 
 ## 6. 线表（核心成果）
