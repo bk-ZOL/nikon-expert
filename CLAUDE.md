@@ -58,6 +58,12 @@
 - `diagram_config.py` 加了 J/P 接插件规则（`J1394G`、`P1024`）。
 - 已重做 S206D Vol.1~4、两份 SMIF Loader。重建索引：`scripts/build_diagram_index.py --full`。
 - 服务器已装 tesseract（chi_sim/eng/jpn）和 LibreOffice，`.env` 里有 `TESSDATA_PREFIX`。
+- **`net_trace.py`（网页的 `trace_connection`）2026-10-12 改过**：
+  - 页面文字从全文索引读，OCR 编号能参与交叉引用，结果里标"（OCR）"。
+  - 交叉引用范围是同机型的所有电路图（S206D 4 卷 + SMIF），所查编号的页排最前。
+  - **Nikon 图纸在中继面板等处常把接插件号写成不带前缀的 `2613C`**（就是 P2613C）。现在 4 位数字 + 1 个字母的编号统一按 J/P 号处理；`7214A2` 这类网络号不变。
+- **S207D 已融合版（5180 页）没做过 OCR**，现在只有 S206D 4 卷和两份 SMIF Loader 有 OCR 编号。要补的话，服务器只有 2 核，按每页十几秒估，要跑很久。
+- **S207D 已融合版在全文索引里记的 `file_path` 是 Mac 上的 `/Users/jayce/Downloads/…`**，服务器上不存在。这导致网页的"看图"和 `trace_connection` 以前在 S207D 主图册上一直查不到。现在 `figures._circuit_pages` 在路径不存在时按文件名到 `data/` 下找，已经能查到，但**库里的路径还是错的**，以后可以改掉。
 
 ## 6. 线表（核心成果）
 
@@ -93,7 +99,7 @@
 
 1. ~~部署、验证 `nikon_trace`，接进网页界面~~（2026-10-12 完成）
 2. ~~按内容判断机型~~（2026-10-12 完成，新入库和存量都已按内容打标签，见第 4 节）
-3. `net_trace.py` 改成从全文索引读文字，OCR 补出的编号也能用。
+3. ~~`net_trace.py` 改成从全文索引读文字，OCR 补出的编号也能用~~（2026-10-12 完成，见第 5 节）
 4. 错误码格式换算：现场写的 `STG-29-80` 要能对上手册里的 `#29H` / `Detail 80H`（STG 错误码原文在 WPS 的 `e_st_0540.txt`）。
 5. 网页右上角的向量数只在启动时算一次，改成实时查。
 6. 重排序：现在用 deepseek 做（只看每段前 180 个字）。可以换成硅基流动的 rerank 接口（如 `Qwen3-VL-Reranker-8B` / `bge-reranker-v2-m3`）。`engine.py` 里旧的本地 reranker 初始化会报一条无害的警告，可以清掉。
