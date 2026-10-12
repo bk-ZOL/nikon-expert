@@ -198,6 +198,16 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
             return _trace(query)
         return _memo("trace_connection", query, run, timeout=90)
 
+    def netlist_trace(query: str) -> str:
+        """线表追线：查"某个接插件/线缆两头接到哪、经过哪根线缆、哪几针、在第几页"，并往外追 2 跳。
+        数据是从 S207D 电路图（含 SMIF Loader）配线图抽出来的线缆级连接表，J 与 P 同号按对插处理。
+        问题里有接插件号（J7554A、P1394A）或线缆号（4S095-884）时优先用本工具；查不到再用 trace_connection。
+        参数 query: 一个接插件号、线缆号或设备/基板名（如「J7544B」「4S095-884」「Robot Controller」）。"""
+        def run():
+            from src.netlist_trace import trace as _trace
+            return _trace(query, max_hops=2, max_lines=40)
+        return _memo("netlist_trace", query, run)
+
     return [
         FunctionTool.from_defaults(fn=error_code_lookup),
         FunctionTool.from_defaults(fn=keyword_search),
@@ -205,4 +215,5 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
         FunctionTool.from_defaults(fn=fault_history_lookup),
         FunctionTool.from_defaults(fn=inspect_diagram),
         FunctionTool.from_defaults(fn=trace_connection),
+        FunctionTool.from_defaults(fn=netlist_trace),
     ]

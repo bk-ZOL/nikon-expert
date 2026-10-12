@@ -5,6 +5,8 @@
 - J 与 P 同号视为对插（J7554A ≡ P7554A），合并成同一个接头节点。
 - 只有"全局唯一"的接插件号（J/P + 4 位以上数字）才跨页追；
   CN1、CN7、TB4、PS23 这类板上局部编号只在同一页内连接，避免把不相干的板串在一起。
+- 一个字段里写了多个全局接插件号（AI 把一组接头归成一条，如 "J7544B / J7602H / J7544C"）的连接，
+  照常显示、也能被直接查到，但不从这些号继续往外追，否则会串到别的单元。
 """
 import os
 import re
@@ -29,6 +31,17 @@ def _uniq(k: str) -> bool:
     return bool(_UNIQ.fullmatch(k))
 
 
+def _lumped(*fields) -> set:
+    """一个字段里写了多个全局接插件号（"J7544B / J7544C"、"J4145~J4150"）时返回这些号（不往外追）。
+    conn 与 mate 是两个不同的接头（P1028A 插 J1113A），分开判断，不算归组。"""
+    out = set()
+    for f in fields:
+        ks = {k for k in keys_of(f) if _uniq(k)}
+        if len(ks) > 1:
+            out |= ks
+    return out
+
+
 def load():
     db = os.getenv("NETLIST_DB", "./data/netlist.db")
     if not os.path.exists(db):
@@ -47,6 +60,7 @@ def load():
                  "b": (r[9] or "", r[10] or "", " ".join(x for x in r[11:14] if x)),
                  "wires": r[14] or "", "model": r[15] or ""}
             e["keys"] = keys_of(r[4], r[5], r[9], r[10])
+            e["follow"] = e["keys"] - _lumped(r[4], r[5], r[9], r[10])
             i = len(edges)
             edges.append(e)
             for k in e["keys"]:
@@ -110,7 +124,7 @@ def trace(query: str, max_hops: int = 3, max_lines: int = 80) -> str:
             w = f" {e['wires']}" if e["wires"] else ""
             out.append(f"  {_end(e['a'])}  ──[{cab}{w}]──  {_end(e['b'])}"
                        f"   《{_doc_short(e['doc'])}》第 {e['page']} 页")
-            for k in e["keys"]:
+            for k in e["follow"]:
                 if k in visited:
                     continue
                 visited.add(k)
