@@ -255,3 +255,21 @@ def nikon_query_worklog(recent_days: int = 7, date_from: str = "", date_to: str 
     head = f"【{title} · {scope} · 实时读取自飞书】\n可用日期范围 {days[-1]['date']} … {days[0]['date']}"
     body = "\n\n────────────\n".join(d["text"] for d in sel)
     return head + "\n\n" + body
+
+
+
+@mcp.tool()
+def nikon_trace(query: str, max_hops: int = 3) -> str:
+    """追线：在线表（AI 从 S207D 电路图配线图抽取的线缆级连接，含 SMIF Loader）里，
+    从一个接插件号 / 线缆号 / 设备名出发，一跳一跳列出连到哪里、经过哪根线缆、在第几页。
+
+    适用于"这个接插件接到哪 / 这根线两头是什么 / 某板和哪些板相连 / 信号怎么走"这类问题。
+    J 与 P 同号视为对插（J7554A≡P7554A）；CN1、TB4 这类板上局部编号只在同一页内连接。
+    结果由 AI 读图得到，关键结论请再用 nikon_view_diagram 调原图核对。
+
+    Args:
+        query: 接插件号（J7554A、P1394A、CN7B、PS23A）、线缆号（4S095-884）或设备/基板名（Robot Controller）。
+        max_hops: 往外追几跳，默认 3。
+    """
+    from src.netlist_trace import trace
+    return trace(query, max_hops=max_hops)
