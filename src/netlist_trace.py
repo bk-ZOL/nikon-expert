@@ -5,8 +5,11 @@
 - J 与 P 同号视为对插（J7554A ≡ P7554A），合并成同一个接头节点。
 - 只有"全局唯一"的接插件号（J/P + 4 位以上数字）才跨页追；
   CN1、CN7、TB4、PS23 这类板上局部编号只在同一页内连接，避免把不相干的板串在一起。
-- 一个字段里写了多个全局接插件号（AI 把一组接头归成一条，如 "J7544B / J7602H / J7544C"）的连接，
-  照常显示、也能被直接查到，但不从这些号继续往外追，否则会串到别的单元。
+- 接插件号只在同一机型内唯一：已融合版里同时有 S207D 和 S307E 的图，照明切换部两种机型编号不同
+  （S307E 第 4142 页的 J7544E 是快门传感器，S207D 第 70 页的 J7544E 是 SPURE 原点传感器）。
+  每页按页上的 "(NSR-S307E)" / "(NSR-S207D)" 标记推断机型，跨页时 S207D 页和 S307E 页不互连，通用页两边都连。
+- 一个字段里写了一组接插件号（"J7544B / J7602H / J7544C …"）的，是一束线分出的多路（第 4142 页对过原图），照常往外追。
+  设 NETLIST_BLOCK_LUMPED=1 可改回不往外追。
 - 线缆号是零件号，同一个号可能用在好几处（如一整排相同单元）。只有在所有页上都只连着同两个接插件的线缆号，
   才拿来跨页连接；这种线缆在某页上一头写的是"?"时，按别的页补上另一头。
 - 同一条连接在多页重复出现（同两头、同线缆）合并成一行，列出全部页码。
@@ -23,6 +26,7 @@ _UNIQ = re.compile(r"J/P\d{4}[A-Z0-9]*")
 _CABLE = re.compile(r"\d?[A-Z]\d{3}-\d{3}(?:-\d+)?")
 _NET = {"mtime": None}
 JUNCTION = 3            # 一个接头上的候选支路达到这个数才按针脚过滤
+_BLOCK_LUMPED = os.getenv("NETLIST_BLOCK_LUMPED", "0") == "1"
 
 
 def keys_of(*fields) -> set:
@@ -98,11 +102,12 @@ def load():
         sig = (cab, frozenset(keys)) if keys else None
         e = {"a": (r[4] or "", r[5] or "", " ".join(x for x in r[6:9] if x)),
              "b": (r[9] or "", r[10] or "", " ".join(x for x in r[11:14] if x)),
+             "adev": r[6] or "", "bdev": r[11] or "",
              "cable": r[3] or "", "wires": r[14] or ""}
         if sig in gidx:
             g = groups[gidx[sig]]
         else:
-            g = {"cab": cab, "keys": keys, "follow": keys - _lumped(r[4], r[5], r[9], r[10]),
+            g = {"cab": cab, "keys": keys, "follow": keys - (_lumped(r[4], r[5], r[9], r[10]) if _BLOCK_LUMPED else set()),
                  "pages": [], "best": e, "pins": None}
             if sig is not None:
                 gidx[sig] = len(groups)
@@ -141,12 +146,115 @@ def load():
             if pg:
                 g["fill"] = f"{_pretty(k)}（据第 {'、'.join(map(str, pg[:3]))} 页）"
 
+    fts = _fts_pages({d for g in groups for d, _ in g["pages"]})
+    var = _page_variants(fts)
+    for g in groups:
+        g["var"] = {var.get(k, "") for k in g["pages"]} - {""}
+    _add_hints(groups, ok_cab, None, fts)
+
     index = {}
     for i, g in enumerate(groups):
         for k in g["keys"] | {k for k in g["follow"] if k.startswith("C:")}:
             index.setdefault(k, []).append(i)
     _NET.update(mtime=mt, groups=groups, index=index)
     return _NET
+
+
+_norm = lambda x: re.sub(r"[^A-Z0-9]", "", (x or "").upper())
+
+
+def _fts_pages(docs: set) -> dict:
+    """全文索引里这些电路图每页的 {(图册, 页): (去掉符号转大写的文字, 本页线缆号集合, 页上标的机型)}。读不到返回空。"""
+    db = os.getenv("FTS_DB_PATH", "./data/fts.db")
+    if not os.path.exists(db):
+        return {}
+    try:
+        try:
+            import pysqlite3 as sq
+        except Exception:
+            sq = sqlite3
+        con = sq.connect(db)
+        out = {}
+        for name, title, text in con.execute(
+                "select doc_name, section_title, text from doc_fts where doc_type='circuit_diagram'"):
+            if name in docs:
+                m = re.search(r"(\d+)", title or "")
+                if m:
+                    t = text or ""
+                    mark = "S307E" if "(NSR-S307E)" in t else "S207D" if "(NSR-S207D)" in t else ""
+                    out[(name, int(m.group(1)))] = (_norm(t), set(_CABLE.findall(t.upper())), mark)
+        con.close()
+        return out
+    except Exception:
+        return {}
+
+
+def _page_variants(pages: dict, window: int = 80) -> dict:
+    """已融合版里同时装着 S207D 和 S307E 的图，两种机型的接插件编号不一样
+    （S307E 第 4142 页的 J7544E 是快门传感器，S207D 第 70 页的 J7544E 是 SPURE 原点传感器）。
+    页上写了 "(NSR-S307E)" / "(NSR-S207D)" 的直接用；没写的，前后最近的标记一致（相距不超过 window 页）
+    或 20 页内只有一种标记，就沿用；推不出来的算通用页。返回 {(图册, 页): "S207D" / "S307E" / ""}。"""
+    import bisect
+    out = {}
+    by_doc = {}
+    for (d, p), v in pages.items():
+        by_doc.setdefault(d, {})[p] = v[2]
+    for d, lab in by_doc.items():
+        L = sorted(p for p, v in lab.items() if v)
+        for p, v in lab.items():
+            if not v and L:
+                i = bisect.bisect_left(L, p)
+                a = L[i - 1] if i > 0 else None
+                b = L[i] if i < len(L) else None
+                if a is not None and b is not None and lab[a] == lab[b] and b - a <= window:
+                    v = lab[a]
+                else:
+                    near = {lab[x] for x in (a, b) if x is not None and abs(x - p) <= 20}
+                    v = near.pop() if len(near) == 1 else ""
+            out[(d, p)] = v
+    return out
+
+
+def _add_hints(groups, ok_cab, docs, pages=None):
+    """一头是"?"、又没能按线缆补上的连接：按全文索引找"另一头可能画在哪页"。
+    依据从强到弱：别的页同时有这根线缆号和这个设备名 > 只有线缆号（仅限不一号多用的线缆，≤3 页）
+    > 只有设备名（这个设备在线表里出现不超过 4 页）。"""
+    pages = _fts_pages(docs) if pages is None else pages
+    cab_pages = {}
+    for key, (_, cabs, _) in pages.items():
+        for c in cabs:
+            cab_pages.setdefault(c, set()).add(key)
+    dev_pages = {}
+    for g in groups:
+        b = g["best"]
+        for (c, m, _), dev in ((b["a"], b["adev"]), (b["b"], b["bdev"])):
+            if (c or m) and len(_norm(dev)) >= 4:
+                dev_pages.setdefault(_norm(dev), set()).update(g["pages"])
+    for g in groups:
+        g["hint"] = ""
+        b = g["best"]
+        a_empty, b_empty = not (b["a"][0] or b["a"][1]), not (b["b"][0] or b["b"][1])
+        if g["fill"] or a_empty == b_empty:
+            continue
+        dev = _norm(b["adev"] if a_empty else b["bdev"])
+        own = set(g["pages"])
+        found, why = set(), ""
+        if g["cab"]:
+            cands = cab_pages.get(g["cab"], set()) - own
+            if len(dev) >= 4:
+                both = {k for k in cands if dev[:24] in pages[k][0]}
+                if both:
+                    found, why = both, "同线缆号、同设备名"
+            if not found and g["cab"] in ok_cab and 0 < len(cands) <= 3:
+                found, why = cands, "同线缆号"
+        if not found and len(dev) >= 4:
+            dp = dev_pages.get(dev, set()) - own
+            if 0 < len(dp) <= 4:
+                found, why = dp, "这个设备的接线"
+        if found:
+            pg = sorted(p for _, p in found)
+            more = f" 等 {len(pg)} 页" if len(pg) > 4 else " 页"
+            g["hint"] = f"另一头可能在第 {'、'.join(map(str, pg[:4]))}{more}（{why}）"
 
 
 def _doc_short(d: str) -> str:
@@ -167,7 +275,8 @@ def _where(g) -> str:
     by = {}
     for d, p in g["pages"]:
         by.setdefault(_doc_short(d), []).append(p)
-    return "；".join(f"《{d}》第 {'、'.join(map(str, sorted(ps)))} 页" for d, ps in by.items())
+    v = "/".join(sorted(g.get("var") or []))
+    return "；".join(f"《{d}》第 {'、'.join(map(str, sorted(ps)))} 页" for d, ps in by.items()) + (f"〔{v}〕" if v else "")
 
 
 def _line(g) -> str:
@@ -175,8 +284,9 @@ def _line(g) -> str:
     cab = b["cable"] or "无线缆号"
     w = f" {b['wires']}" if b["wires"] else ""
     a_empty = not (b["a"][0] or b["a"][1])
+    hint = f"  ⇢ {g['hint']}" if g.get("hint") else ""
     return (f"{_end(b['a'], g['fill'] if a_empty else '')}  ──[{cab}{w}]──  "
-            f"{_end(b['b'], '' if a_empty else g['fill'])}   {_where(g)}")
+            f"{_end(b['b'], '' if a_empty else g['fill'])}   {_where(g)}{hint}")
 
 
 def trace(query: str, max_hops: int = 3, max_lines: int = 80) -> str:
@@ -191,11 +301,18 @@ def trace(query: str, max_hops: int = 3, max_lines: int = 80) -> str:
     def share_page(i, j):
         return bool(set(G[i]["pages"]) & set(G[j]["pages"]))
 
+    def same_model(i, j):
+        """S207D 页和 S307E 页不互连（两种机型编号不同）；通用页、推不出机型的页两边都连。"""
+        vi, vj = G[i].get("var"), G[j].get("var")
+        return not vi or not vj or bool(vi & vj)
+
     def lookup(k, frm=None):
-        """经过 k 能到的连接。全局号/线缆号跨页；局部编号只在同一页。"""
+        """经过 k 能到的连接。全局号/线缆号跨页（同机型）；局部编号只在同一页。"""
         hits = I.get(k, [])
-        if frm is None or _uniq(k) or k.startswith("C:"):
+        if frm is None:
             return list(hits)
+        if _uniq(k) or k.startswith("C:"):
+            return [j for j in hits if same_model(j, frm)]
         return [j for j in hits if share_page(j, frm)]
 
     start = keys_of(q)
@@ -288,6 +405,7 @@ def trace(query: str, max_hops: int = 3, max_lines: int = 80) -> str:
     if truncated[0]:
         out.append("  …结果太多已截断，换个更具体的接插件号再查，或减少跳数。")
     out.append("\n说明：J 与 P 同号按对插处理；CN/TB 等板上局部编号只在同一页内连接；"
-               "“?→X（据第 N 页）”是按同一根线缆在别的页的记录补的另一头。"
+               "〔S207D〕〔S307E〕是这页属于哪个机型（两种机型接插件编号不同，不互连，没标的是通用页）；"
+               "“?→X（据第 N 页）”是按同一根线缆在别的页的记录补的另一头；“⇢ 另一头可能在第 N 页”是按全文索引找的线索，要看图确认。"
                "连接关系由 AI 读图抽取，关键结论请用 nikon_view_diagram 调原图核对。")
     return "\n".join(out)
