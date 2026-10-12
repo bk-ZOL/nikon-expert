@@ -102,6 +102,9 @@ def _circuit_pages(query: str, k: int = 4):
     out, seen = [], set()
 
     def _add(doc_name, fp, page, text):
+        if fp and not Path(fp).exists():
+            # 索引里记的可能是入库那台机器上的路径（如 Mac 的 ~/Downloads），按文件名在 data/ 下找
+            fp = _locate_pdf(doc_name or Path(fp).name) or _locate_pdf(Path(fp).name)
         if not fp or not Path(fp).exists():
             return
         key = (fp, page)
