@@ -105,7 +105,10 @@ def cmd_apply(a):
     if a.dry:
         print("（试跑，没写入）")
         return
-    backup = Path("data") / f"vector_glyph_backup_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    tag = hashlib.md5(names[0].encode()).hexdigest()[:6]          # 带图册指纹和毫秒，连续跑几本不会撞名
+    backup = Path("data") / f"vector_glyph_backup_{time.strftime('%Y%m%d_%H%M%S')}_{int(time.time() * 1000) % 1000:03d}_{tag}.json"
+    if backup.exists():
+        sys.exit(f"备份文件已存在，不覆盖：{backup}")
     backup.write_text(json.dumps({str(r): v[0] for r, v in changes.items()}, ensure_ascii=False))
     for rowid, (_, new_text) in changes.items():
         con.execute("update doc_fts set text=? where rowid=?", (new_text, rowid))
