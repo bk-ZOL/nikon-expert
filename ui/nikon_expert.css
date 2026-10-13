@@ -449,3 +449,12 @@ html, body, gradio-app, .gradio-container, .app, .main, .contain, .wrap,
 }
 body, gradio-app, .gradio-container, .dark body, .dark .gradio-container{ color:#2B2B26 !important; }
 .dark .block, .dark .form, .dark .panel{ background-color:transparent !important; }
+
+/* ── 对话正文不发灰 ──────────────────────────────────────
+   Gradio 6 自带：.prose.chatbot.md / .message-content 有 opacity:.8，
+   且 .prose *{color:var(--body-text-color)} 会盖掉 .message 的颜色；
+   系统深色模式下该变量是浅灰 #c8c9d2，落在强制的米白底上几乎看不清。 */
+.dark, :root { --body-text-color: #2B2B26 !important; --body-text-color-subdued: #84806F !important; }
+.chatbot .prose.chatbot.md, .chatbot .message-content, .message-wrap .prose { opacity: 1 !important; }
+.chatbot .message .prose *:not(a):not(code),
+.chatbot .message-text, .chatbot .md *:not(a):not(code) { color: #2B2B26 !important; }
