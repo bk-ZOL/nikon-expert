@@ -83,18 +83,8 @@ def _init_engine():
 
     retriever = VectorIndexRetriever(index=index, similarity_top_k=top_k)
 
-    reranker = None
-    try:
-        from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
-        reranker = FlagEmbeddingReranker(model=reranker_path, top_n=rerank_top_n)
-        print("⚙️  重排序：FlagEmbeddingReranker")
-    except Exception:
-        try:
-            from llama_index.core.postprocessor import SentenceTransformerRerank
-            reranker = SentenceTransformerRerank(model=reranker_path, top_n=rerank_top_n)
-            print("⚙️  重排序：SentenceTransformerRerank")
-        except Exception as e:
-            print(f"⚠️  重排序不可用，跳过：{e}")
+    reranker = None   # 精排在 _rerank 里做（云端 bge-reranker API，失败回退 LLM），不再加载本地模型
+    print(f"⚙️  重排序：{_rerank_provider()}")
 
     # 初始化 FTS 层 (Karpathy)
     init_fts(fts_path)
@@ -497,12 +487,50 @@ def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
     return merged, qtype
 
 
+def _rerank_provider() -> str:
+    """RERANK_PROVIDER=llm（默认，当前大脑精排）/ api（硅基流动 bge-reranker-v2-m3 免费版 + 与原名次融合）。
+
+    2026-10-14 用 8 个现场问题对比：api 每次 0.4s、llm 8~22s；但 api 会被字面相近的词带偏
+    （"reticle blind" 排出 "Reticle Resetting"），质量没有更好（llm 胜 2、api 胜 1、其余相当），所以默认仍用 llm。
+    """
+    p = os.getenv("RERANK_PROVIDER", "llm").lower()
+    return p if p in ("api", "llm") else "llm"
+
+
+def _rerank_api(question: str, candidates: list, top_n: int) -> list:
+    """云端 cross-encoder 精排：每段看标题 + 前 1500 字（LLM 精排只看前 180 字）。出错抛异常，由调用方回退。"""
+    import httpx
+    base = os.getenv("RERANK_API_BASE", os.getenv("EMBED_API_BASE", "https://api.siliconflow.cn/v1")).rstrip("/")
+    key = os.getenv("RERANK_API_KEY") or os.getenv("EMBED_API_KEY", "")
+    docs = [f"《{c.get('doc_name', '')}》{c.get('section_title', '') or ''}\n{(c.get('text', '') or '')[:1500]}"
+            for c in candidates]
+    with httpx.Client(timeout=float(os.getenv("RERANK_API_TIMEOUT", "15")), trust_env=False) as cli:
+        r = cli.post(f"{base}/rerank", headers={"Authorization": f"Bearer {key}"},
+                     json={"model": os.getenv("RERANK_API_MODEL", "BAAI/bge-reranker-v2-m3"),
+                           "query": question, "documents": docs, "top_n": len(docs), "return_documents": False})
+        r.raise_for_status()
+        res = sorted(r.json()["results"], key=lambda x: -x["relevance_score"])
+    # 融合：reranker 名次和检索阶段原名次（RRF）按 RERANK_API_WEIGHT（默认 0.6）加权，
+    # 防止 reranker 被字面相近的词带偏（reticle blind / Reticle Resetting）时把原本靠前的对题资料挤掉
+    w, k = float(os.getenv("RERANK_API_WEIGHT", "0.6")), 3
+    rank = {x["index"]: i for i, x in enumerate(res)}
+    score = {x["index"]: float(x["relevance_score"]) for x in res}
+    fused = sorted(range(len(candidates)), key=lambda i: -(w / (k + rank.get(i, len(res)))
+                                                        + (1 - w) / (k + i)))
+    out = []
+    for i in fused[:top_n]:
+        c = dict(candidates[i])
+        c["rerank_score"] = round(score.get(i, 0.0), 4)
+        out.append(c)
+    return out
+
+
 def _rerank(question: str, candidates: list, top_n: int) -> list:
     """第三层 Rerank：对 RRF 候选池按"与问题的真实相关性"精排，取 top_n。
 
-    默认用 LLM(当前大脑)做精排——零额外模型/内存，天然跨语言(中/英/日)。
-    RERANK_ENABLED=false 关闭；失败/不可用则回退 RRF 原序。
-    （若日后要更快的本地 cross-encoder，可换 bge-reranker，但要占 ~2G 内存。）
+    默认用 LLM(当前大脑)精排（只看每段前 180 字）；RERANK_PROVIDER=api 时用云端 bge-reranker-v2-m3
+    （硅基流动免费版，每段看 1500 字，与原名次融合），出错回退 LLM。
+    RERANK_ENABLED=false 关闭；都失败则回退 RRF 原序。
     """
     import os as _os
     if not candidates:
@@ -510,6 +538,11 @@ def _rerank(question: str, candidates: list, top_n: int) -> list:
     if (_os.getenv("RERANK_ENABLED", "true").lower() in ("0", "false", "no")
             or len(candidates) <= top_n):
         return candidates[:top_n]
+    if _rerank_provider() == "api":
+        try:
+            return _rerank_api(question, candidates, top_n)
+        except Exception as e:
+            print(f"⚠️  云端重排序失败，改用 LLM 精排：{type(e).__name__}: {e}")
     try:
         from llama_index.core import Settings
         if Settings.llm is None:
