@@ -15,7 +15,7 @@ NAME_RE = re.compile(r"^([ej])_([a-z]+)_(\d{4})$")
 CTRL = {"st": "STG", "lc": "LC", "al": "AL", "opd": "OPD", "wl": "WL", "rl": "RL", "mac": "MAC",
         "bsa": "BSA", "chmbr": "CHMBR"}
 SECTION_RE = re.compile(r"^#([0-9A-F]{2}|[0-9A-F]{8})H\s*$")
-DETAIL_RE = re.compile(r"^\s*([0-9A-F]{2})H\s*:")
+DETAIL_RE = re.compile(r"^\s*([0-9A-F]{2})H\s*:", re.M)
 
 
 def is_error_text(path) -> bool:
