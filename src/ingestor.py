@@ -639,9 +639,12 @@ def ingest_excel(excel_path: str, machine_model: str = "") -> int:
             cells = [str(c) if c else "" for c in row]
             if all(c == "" for c in cells):
                 continue
+            # 表头为空的列也要收（很多操作说明表没有表头，以前整列内容都丢了）
             text = " | ".join(
-                f"{h}: {v}" for h, v in zip(headers, cells) if h and v
+                (f"{h}: {v}" if h else v) for h, v in zip(headers, cells) if v
             )
+            if not text.strip():
+                continue
             docs.append(Document(
                 text=text,
                 metadata={

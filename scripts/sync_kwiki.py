@@ -324,7 +324,9 @@ def _convert_legacy_office(path: Path, suffix: str):
     tmp = Path(tempfile.mkdtemp(prefix="legacy_"))
     src = tmp / (path.stem + (".xls" if suffix == ".xlsx" else ".doc"))
     shutil.copy(path, src)
-    r = subprocess.run(["soffice", "--headless", "--convert-to", suffix[1:],
+    # 指定导入格式：文件坏了就转换失败；不指定的话 LibreOffice 会退回"按文本导入"，把二进制当内容（出过 13005 段乱码）
+    infilter = "MS Excel 97" if suffix == ".xlsx" else "MS Word 97"
+    r = subprocess.run(["soffice", "--headless", f"--infilter={infilter}", "--convert-to", suffix[1:],
                         "--outdir", str(tmp), str(src)],
                        capture_output=True, text=True, timeout=600)
     out = tmp / path.name
@@ -435,6 +437,8 @@ def main():
     ap.add_argument("--reingest", action="store_true",
                     help="不下载，直接把本地镜像里的文件全部重新摄入（摄入曾失败时用）")
     ap.add_argument("--force", action="store_true", help="忽略状态，全量重新下载")
+    ap.add_argument("--suffix", default="",
+                    help="配合 --reingest：只重新摄入这种后缀的文件（如 .xlsx），同名只做一次，跳过故障履历目录")
     ap.add_argument("--legacy", action="store_true",
                     help="配合 --reingest：只重新摄入老 Office 格式（扩展名 .xlsx/.docx、实际是 OLE）的文件，同名只做一次。"
                          "这批文件在加转换逻辑之前已被记成已同步，WPS 里不改就不会重跑")
@@ -451,6 +455,11 @@ def main():
             if p.suffix.lower() not in INGESTABLE_SUFFIXES:
                 stats["skipped"] += 1
                 continue
+            if args.suffix:
+                if p.suffix.lower() != args.suffix.lower() or "［Driver］" in str(p) or p.name in done \
+                        or map_dir(str(p.relative_to(MIRROR)))[0] == "fault_history":
+                    continue
+                done.add(p.name)
             if args.legacy:
                 if "［Driver］" in str(p) or p.name in done or p.suffix.lower() not in (".xlsx", ".docx"):
                     continue
