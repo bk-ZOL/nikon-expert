@@ -66,6 +66,22 @@ def _pages_text(doc_name: str, pdf_path: str) -> dict:
     return pages
 
 
+_var_cache = {}
+
+
+def _variants(pages: dict) -> dict:
+    """每页属于 S207D 还是 S307E（已融合版里两种机型都有，照明切换部等处接插件编号不同）。
+    规则和线表追线一样（netlist_trace._page_variants）：看页上的 "(NSR-S307E)" / "(NSR-S207D)"，没写的看前后。"""
+    key = id(pages)
+    if key not in _var_cache:
+        from src.netlist_trace import _page_variants
+        marks = {k: (None, None, "S307E" if "(NSR-S307E)" in t else "S207D" if "(NSR-S207D)" in t else "")
+                 for k, t in pages.items()}
+        _var_cache.clear()
+        _var_cache[key] = _page_variants(marks)
+    return _var_cache[key]
+
+
 def _short(name: str) -> str:
     n = name.replace(".pdf", "")
     m = re.search(r"Volume\s*(\d)\s*of\s*(\d)", n, re.I)
@@ -140,8 +156,11 @@ def trace_connection(query: str, max_wires: int = 6, max_refs: int = 6) -> str:
 
     # 本页就是接线表 → 直接给出连接内容（sensor→线号→pin→面板）
     wiring = " ".join(ptext.partition(OCR_MARK)[0].split())
+    var = _variants(pages)
+    v0 = var.get((doc_name, page), "")
+    tag = lambda v: f"〔{v}〕" if v else ""
     lines = [f"【连接追踪 · {query}】",
-             f"起点接线表：《{doc_name}》第 {page} 页",
+             f"起点接线表：《{doc_name}》第 {page} 页{tag(v0)}",
              f"线号/接插件号：{', '.join(show(t) for t in wires)}" + (f"　pin：{', '.join(pins)}" if pins else ""),
              f"接线内容（文字层）：{wiring[:500]}",
              ""]
@@ -149,9 +168,14 @@ def trace_connection(query: str, max_wires: int = 6, max_refs: int = 6) -> str:
     # 交叉引用：把含任一编号的其它页按“内容签名”去重（合并卷常有重复页）
     import hashlib
     want = set(wires)
-    sig_seen, distinct = {}, []
+    sig_seen, distinct, other_model = {}, [], set()
     for (dn, pg) in sorted(pages):
         if (dn, pg) == (doc_name, page):
+            continue
+        v = var.get((dn, pg), "")
+        if v0 and v and v != v0:                 # 另一个机型的页：编号可能同号不同物，不算连通
+            if _quick(pages[(dn, pg)], want) and set(wires) & set(_tokens(pages[(dn, pg)])):
+                other_model.add(pg)
             continue
         t = pages[(dn, pg)]
         if not _quick(t, want):
@@ -175,14 +199,18 @@ def trace_connection(query: str, max_wires: int = 6, max_refs: int = 6) -> str:
         for hdr, pgs, shared in distinct[:max_refs]:
             dup = f"（另有 {len(pgs)-1} 页内容相同）" if len(pgs) > 1 else ""
             dn, pg = pgs[0]
-            where = f"第{pg}页" if dn == doc_name else f"《{_short(dn)}》第{pg}页"
+            where = (f"第{pg}页" if dn == doc_name else f"《{_short(dn)}》第{pg}页") + tag(var.get((dn, pg), ""))
             lines.append(f"    · {where} {dup}｜共享 {', '.join(show(w) for w in shared)}｜{hdr}")
         if len(distinct) > max_refs:
             lines.append(f"    · …还有 {len(distinct) - max_refs} 处，换个更具体的编号再查")
+        if other_model:
+            other = "S307E" if v0 == "S207D" else "S207D"
+            lines.append(f"    （另有 {len(other_model)} 页属于 {other}，两种机型接插件编号可能同号不同物，没有列出）")
         lines.append("\n说明：同一线号/接插件号出现处即电气连通点（J 与 P 同号按对插，图上不带前缀的 2613C 也算同一个）。"
                      "标（识图）的编号不在图纸文字层里，是从图上的笔画字识别出来的（OCR + 矢量字形），可能认错，请对照原图。")
     else:
-        lines.append("▶ 这些编号在同机型的其它电路图页里都没有出现。")
+        lines.append("▶ 这些编号在同机型的其它电路图页里都没有出现。"
+                     + (f"（另有 {len(other_model)} 页属于另一机型，没有列出）" if other_model else ""))
     lines.append("（线号级连接，非像素走线；端子细节请点开原图。）")
     return "\n".join(lines)
 
