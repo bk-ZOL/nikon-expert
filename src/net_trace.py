@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 WIRE_RE = re.compile(r"(?<![A-Za-z0-9])\d{3,4}[A-Z](?:\d[A-Z]?)?(?![A-Za-z0-9])")  # 线号/端子号，如 2613C、7214A2
-CONN_RE = re.compile(r"(?<![A-Za-z0-9])[JP](\d{4,5}[A-Z]?)(?![A-Za-z0-9])")        # 全局接插件号，J1394G ≡ P1394G
+CONN_RE = re.compile(r"(?<![A-Za-z0-9])[JP](\d{4,5}[A-Z]?\d?)(?![A-Za-z0-9])")        # 全局接插件号，J1394G ≡ P1394G
 BARE_CONN = re.compile(r"\d{4,5}[A-Z]")                                            # 不带前缀的接插件号
 PIN_RE  = re.compile(r"\bPS\d{1,2}\b")        # pin，如 PS1 PS5
 OCR_MARK = "【OCR标签】"
@@ -136,7 +136,7 @@ def trace_connection(query: str, max_wires: int = 6, max_refs: int = 6) -> str:
                 f"\n本页内容摘录：{' '.join(ptext.split())[:200]}")
 
     pages = _pages_text(doc_name, pdf)
-    show = lambda t: (f"J{t[3:]}/P{t[3:]}" if t.startswith("J/P") else t) + ("（OCR）" if toks.get(t) else "")
+    show = lambda t: (f"J{t[3:]}/P{t[3:]}" if t.startswith("J/P") else t) + ("（识图）" if toks.get(t) else "")
 
     # 本页就是接线表 → 直接给出连接内容（sensor→线号→pin→面板）
     wiring = " ".join(ptext.partition(OCR_MARK)[0].split())
@@ -180,7 +180,7 @@ def trace_connection(query: str, max_wires: int = 6, max_refs: int = 6) -> str:
         if len(distinct) > max_refs:
             lines.append(f"    · …还有 {len(distinct) - max_refs} 处，换个更具体的编号再查")
         lines.append("\n说明：同一线号/接插件号出现处即电气连通点（J 与 P 同号按对插，图上不带前缀的 2613C 也算同一个）。"
-                     "标（OCR）的编号是从图上竖排字识别出来的，可能认错，请对照原图。")
+                     "标（识图）的编号不在图纸文字层里，是从图上的笔画字识别出来的（OCR + 矢量字形），可能认错，请对照原图。")
     else:
         lines.append("▶ 这些编号在同机型的其它电路图页里都没有出现。")
     lines.append("（线号级连接，非像素走线；端子细节请点开原图。）")

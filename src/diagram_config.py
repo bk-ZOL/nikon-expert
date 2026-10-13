@@ -24,8 +24,8 @@ IDENTIFIER_PATTERNS = [
     ("board_name",  re.compile(r"(?<![A-Za-z0-9])[A-Z]{2,}(?:-[A-Z0-9]{2,}){1,3}(?![A-Za-z0-9])")),
     # unit reference: A-712
     ("unit_ref",    re.compile(r"(?<![A-Za-z0-9])[A-Z]-\d{2,4}(?![A-Za-z0-9])")),
-    # connector (J/P style): J1394G, P1024, J1050A
-    ("connector",   re.compile(r"(?<![A-Za-z0-9])[JP]\d{3,5}[A-Z]?(?![A-Za-z0-9])")),
+    # connector (J/P style): J1394G, P1024, J1050A, J7214A2（字母后还可带一位数字）
+    ("connector",   re.compile(r"(?<![A-Za-z0-9])[JP]\d{3,5}[A-Z]?\d?(?![A-Za-z0-9])")),
     # connector: CN12
     ("connector",   re.compile(r"(?<![A-Za-z0-9])CN\d{1,3}(?![A-Za-z0-9])")),
     # pin / sensor id: PS1, PS1A
