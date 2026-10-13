@@ -7,6 +7,8 @@ import os
 import queue
 import asyncio
 import threading
+import traceback
+import contextvars
 
 from llama_index.core.agent.workflow import (
     ReActAgent, AgentStream, ToolCall, ToolCallResult,
@@ -123,12 +125,15 @@ def run_agent_sync(question: str, history=None):
                 q.put(ev)
         try:
             asyncio.run(go())
-        except Exception as e:
+        except BaseException as e:  # CancelledError 等不是 Exception 子类，漏掉会让 agent 无声结束
+            traceback.print_exc()
             q.put({"kind": "error", "error": f"{type(e).__name__}: {e}"})
         finally:
             q.put(SENTINEL)
 
-    t = threading.Thread(target=worker, daemon=True)
+    # 带上调用方的 contextvars（ACL 登录身份），否则工具里的检索拿不到当前用户
+    ctx = contextvars.copy_context()
+    t = threading.Thread(target=lambda: ctx.run(worker), daemon=True)
     t.start()
     while True:
         ev = q.get()

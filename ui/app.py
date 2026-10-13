@@ -182,7 +182,8 @@ def chat(question: str, history: list, request: gr.Request = None):
                     sources = "\n\n**📚 参考来源：**\n" + "\n".join(f"- {c}" for c in citations)
                     new_history[-1]["content"] = accumulated + sources
                 else:
-                    new_history[-1]["content"] = accumulated or delta
+                    # 最终 delta 可能带错误提示（如 Agent 出错），不能被已累积的进度文字吞掉
+                    new_history[-1]["content"] = accumulated + delta
             else:
                 accumulated += delta
                 new_history[-1]["content"] = accumulated
@@ -774,7 +775,8 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
         gr.HTML(_account_html())
 
     maintop = gr.HTML(_maintop_html)          # 传函数：每次打开网页时现查向量数
-    gr.Timer(60).tick(_maintop_html, None, maintop)   # 开着网页也每分钟刷新（入库/删除后数字跟着变）
+    # 后台刷新一律 show_progress="hidden"：默认会把输出区调半透明，看起来字变灰
+    gr.Timer(60).tick(_maintop_html, None, maintop, show_progress="hidden")   # 开着网页也每分钟刷新（入库/删除后数字跟着变）
 
     # ── 视图：对话 ──
     with gr.Column(visible=True) as view_chat:
@@ -903,7 +905,7 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
     switch_btn.click(do_apply_model, [provider_dropdown, model_dropdown], [switch_status])
 
     kb_upload_btn.click(do_ingest_files, [kb_files, kb_mode], [ingest_status, jobs_html])
-    jobs_timer.tick(_tick_jobs, None, [jobs_html, kb_table])
+    jobs_timer.tick(_tick_jobs, None, [jobs_html, kb_table], show_progress="hidden")
     okf_import_btn.click(do_okf_import, [okf_dir_input], [okf_status_md])
     fts_index_btn.click(do_fts_index, [fts_dir_input, fts_pattern], [fts_status_md])
     fts_clear_btn.click(do_fts_clear, None, [fts_status_md])

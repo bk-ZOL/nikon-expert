@@ -696,7 +696,7 @@ def _agent_query_stream(question: str, history: list = None):
     if final:
         yield "", True, final["citations"], final["citations_data"], final["has_result"]
     else:
-        yield "", True, [], [], False
+        yield "\n\n⚠️ 排查中途结束，没有得出结论，请稍后重发。", True, [], [], False
 
 
 def query_stream(question: str, mode: str = "qa", history: list = None, user=None):
