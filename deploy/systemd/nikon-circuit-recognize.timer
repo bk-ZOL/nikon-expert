@@ -1,0 +1,9 @@
+[Unit]
+Description=每天兜底跑一次电路图识图（同步入库新电路图时会立刻触发，这里只是保险）
+
+[Timer]
+OnCalendar=*-*-* 19:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -43,7 +43,7 @@ def from_text_file(ctrl: str, main: str, det: str = ""):
     f = _text_file(ctrl)
     if not f:
         return None
-    lines = f.read_bytes().decode("cp932", errors="ignore").splitlines()
+    lines = f.read_bytes().decode("euc_jp", errors="ignore").splitlines()
     start = next((i for i, l in enumerate(lines) if l.strip().upper() == f"#{main}H"), None)
     if start is None:
         return None

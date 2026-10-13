@@ -344,6 +344,15 @@ def _model_for(path: Path) -> str:
 
 def ingest_dispatch(local_path: Path, doc_type: str):
     """按后缀 + doc_type 分发到现有摄入管线。"""
+    from src.ingest_error_text import is_error_text, ingest_error_text
+    if is_error_text(local_path):               # 错误信息原文（没有扩展名）：每个错误码一条全文记录
+        ingest_error_text(local_path, machine_model=_model_for(local_path))
+        try:
+            from src.acl_classify import apply_doc_acl
+            apply_doc_acl(local_path.name)
+        except Exception:
+            pass
+        return
     _ensure_embed()
     suffix = local_path.suffix.lower()
     local_path = _convert_legacy_office(local_path, suffix)  # 老 .xls/.doc 先转换
@@ -355,6 +364,10 @@ def ingest_dispatch(local_path: Path, doc_type: str):
         if "circuit diagram" in local_path.name.lower():
             from src.ingestor import ingest_circuit_pdf
             ingest_circuit_pdf(str(local_path), machine_model=model)
+            # 入库只取文字层（CIRCUIT_OCR=0）；OCR + 矢量字形识读交给后台任务，它会等同步结束再开始
+            import subprocess
+            subprocess.run(["systemctl", "start", "--no-block", "nikon-circuit-recognize.service"], check=False)
+            print("    ↳ 已启动后台识图任务 nikon-circuit-recognize")
         else:
             from src.ingestor import ingest_pdf
             ingest_pdf(str(local_path), machine_model=model, language="zh")
@@ -529,7 +542,8 @@ def main():
                 dest = new_dest
                 print(f"    ↳ 识别为 {ext}: {dest.name}")
 
-        ingestable = dest.suffix.lower() in INGESTABLE_SUFFIXES
+        from src.ingest_error_text import is_error_text
+        ingestable = dest.suffix.lower() in INGESTABLE_SUFFIXES or is_error_text(dest)   # e_st_0540 等错误信息原文
         size_mb = dest.stat().st_size / 1024 / 1024
         limit = MAX_DOC_MB if ingestable else MAX_FILE_MB
         if size_mb > limit:

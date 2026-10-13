@@ -773,7 +773,8 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
         gr.HTML(_SIDE_RECENT)
         gr.HTML(_account_html())
 
-    gr.HTML(_maintop_html())
+    maintop = gr.HTML(_maintop_html)          # 传函数：每次打开网页时现查向量数
+    gr.Timer(60).tick(_maintop_html, None, maintop)   # 开着网页也每分钟刷新（入库/删除后数字跟着变）
 
     # ── 视图：对话 ──
     with gr.Column(visible=True) as view_chat:
