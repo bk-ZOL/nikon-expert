@@ -422,18 +422,29 @@ def main():
     ap.add_argument("--reingest", action="store_true",
                     help="不下载，直接把本地镜像里的文件全部重新摄入（摄入曾失败时用）")
     ap.add_argument("--force", action="store_true", help="忽略状态，全量重新下载")
+    ap.add_argument("--legacy", action="store_true",
+                    help="配合 --reingest：只重新摄入老 Office 格式（扩展名 .xlsx/.docx、实际是 OLE）的文件，同名只做一次。"
+                         "这批文件在加转换逻辑之前已被记成已同步，WPS 里不改就不会重跑")
     args = ap.parse_args()
 
     if args.reingest:
         if not MIRROR.exists():
             sys.exit(f"镜像目录不存在: {MIRROR}")
         stats = {"ingested": 0, "failed": 0, "skipped": 0}
+        done = set()
         for p in sorted(MIRROR.rglob("*")):
             if not p.is_file() or p.name.startswith("."):
                 continue
             if p.suffix.lower() not in INGESTABLE_SUFFIXES:
                 stats["skipped"] += 1
                 continue
+            if args.legacy:
+                if "［Driver］" in str(p) or p.name in done or p.suffix.lower() not in (".xlsx", ".docx"):
+                    continue
+                with open(p, "rb") as fh:
+                    if fh.read(4) != b"\xd0\xcf\x11\xe0":
+                        continue
+                done.add(p.name)
             doc_type, _ = map_dir(str(p.relative_to(MIRROR)))
             print(f"  ⚙  {p.relative_to(MIRROR)}  [{doc_type}]")
             try:
