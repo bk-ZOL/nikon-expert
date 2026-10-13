@@ -54,6 +54,19 @@ Step 2：... [来源：...]
 """
 
 
+def history_text(content) -> str:
+    """取聊天记录里一条消息的纯文字。
+    gradio 6 回传的 content 是 [{'type':'text','text':...}, ...] 列表，不是字符串；文件/图片块忽略。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        content = [content]
+    if isinstance(content, (list, tuple)):
+        return "\n".join(b.get("text", "") if isinstance(b, dict) else (b if isinstance(b, str) else "")
+                         for b in content).strip()
+    return ""
+
+
 def _to_chat_history(history):
     """把 UI 的 [{'role','content'},...] 转成 ChatMessage 列表（取最近几轮）。"""
     if not history:
@@ -62,7 +75,7 @@ def _to_chat_history(history):
     msgs = []
     for m in history[-6:]:
         role = m.get("role", "user")
-        content = (m.get("content", "") or "")[:800]
+        content = history_text(m.get("content", ""))[:800]
         if not content:
             continue
         msgs.append(ChatMessage(role="user" if role == "user" else "assistant", content=content))

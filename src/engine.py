@@ -706,6 +706,7 @@ def query_stream(question: str, mode: str = "qa", history: list = None, user=Non
     """
     from src.prompts import KNOWLEDGE_QA_PROMPT, TROUBLESHOOTING_PROMPT, NO_RESULT_RESPONSE
     from src.router import should_use_agent
+    from src.agent import history_text
     from llama_index.core import Settings
     from src import acl
 
@@ -732,7 +733,7 @@ def query_stream(question: str, mode: str = "qa", history: list = None, user=Non
             turns = []
             for msg in recent:
                 role = "工程师" if msg["role"] == "user" else "助手"
-                turns.append(f"{role}：{msg['content'][:400]}")
+                turns.append(f"{role}：{history_text(msg.get('content'))[:400]}")
             history_prefix = "【对话历史（最近几轮）】\n" + "\n".join(turns) + "\n\n"
 
         prompt_tmpl = TROUBLESHOOTING_PROMPT if mode == "troubleshoot" else KNOWLEDGE_QA_PROMPT
