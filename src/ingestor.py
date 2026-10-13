@@ -609,6 +609,53 @@ def ingest_pdf_dir(pdf_dir: str = None, machine_model: str = "") -> int:
 # ─────────────────────────────────────────────────────────────
 # 3. Excel Checksheet（保持现有逻辑 + 去重 + FTS）
 # ─────────────────────────────────────────────────────────────
+def office_image_ocr(path, existing_chars: int = 0) -> list:
+    """Excel/Word 里贴的截图做 OCR，返回 [(段标题, 文字)]。
+
+    很多操作说明是把软件界面截图贴进 Excel/Word 做的，正文几乎没字（S207 RETICLE BLIND PROCEDURE 等）。
+    只对正文少于 OFFICE_IMAGE_OCR_MAX_TEXT（默认 2000）字的文档做；跳过小于 20KB 的图（图标、logo）；
+    语言 OFFICE_IMAGE_OCR_LANGS（默认 eng+chi_sim，日文包会多认出乱字）；
+    每行只留有 3 个以上字母/数字/汉字、且符号不多的；整张认不出 30 个字的图（实物照片）丢掉。
+    OFFICE_IMAGE_OCR=0 关闭。"""
+    import re as _re, shutil, subprocess, tempfile, zipfile
+    if os.getenv("OFFICE_IMAGE_OCR", "1").lower() in ("0", "false", "no") or not shutil.which("tesseract"):
+        return []
+    if existing_chars > int(os.getenv("OFFICE_IMAGE_OCR_MAX_TEXT", "2000")):
+        return []
+    try:
+        z = zipfile.ZipFile(str(path))
+    except Exception:
+        return []
+    imgs = [n for n in z.namelist() if _re.search(r"/media/[^/]+\.(png|jpe?g|bmp|gif|tiff?)$", n, _re.I)
+            and z.getinfo(n).file_size >= 20 * 1024]
+    key = lambda n: [int(t) if t.isdigit() else t for t in _re.split(r"(\d+)", n)]
+    imgs.sort(key=key)
+    langs = os.getenv("OFFICE_IMAGE_OCR_LANGS", "eng+chi_sim")
+    good = _re.compile(r"[A-Za-z0-9\u4e00-\u9fff]")
+    out = []
+    with tempfile.TemporaryDirectory() as td:
+        for k, n in enumerate(imgs, 1):
+            f = Path(td) / f"i{k}{Path(n).suffix}"
+            f.write_bytes(z.read(n))
+            try:
+                txt = subprocess.run(["tesseract", str(f), "-", "-l", langs, "--psm", "3"],
+                                     capture_output=True, text=True, timeout=180).stdout
+            except Exception:
+                continue
+            lines = []
+            for line in txt.splitlines():
+                line = " ".join(line.split())
+                g = len(good.findall(line))
+                if g >= 3 and g / max(len(line.replace(" ", "")), 1) >= 0.5:
+                    lines.append(line)
+            text = "\n".join(lines)
+            if len(good.findall(text)) >= 30:
+                out.append((f"截图文字 图{k}", text))
+    if imgs:
+        print(f"  🖼  截图 OCR：{len(imgs)} 张图，{len(out)} 张认出文字")
+    return out
+
+
 def ingest_excel(excel_path: str, machine_model: str = "") -> int:
     """摄入 Excel Checksheet"""
     import openpyxl
@@ -625,7 +672,7 @@ def ingest_excel(excel_path: str, machine_model: str = "") -> int:
     _fts_delete_by_name(doc_name)
 
     wb    = openpyxl.load_workbook(str(path), data_only=True)
-    total = 0
+    total = chars = 0
 
     for sheet_name in wb.sheetnames:
         ws   = wb[sheet_name]
@@ -664,6 +711,19 @@ def ingest_excel(excel_path: str, machine_model: str = "") -> int:
         VectorStoreIndex(docs, storage_context=ctx, show_progress=True)
         total += len(docs)
         print(f"  ✅ 工作表 '{sheet_name}'：{len(docs)} 行摄入完成")
+        chars += sum(len(d.text) for d in docs)
+
+    # 正文很少的（内容是截图）：截图 OCR
+    docs = []
+    for title, text in office_image_ocr(path, chars):
+        docs.append(Document(text=text, metadata={
+            "doc_name": doc_name, "doc_type": "checksheet", "language": "en", "sheet_name": "截图",
+            "machine_model": machine_model, "chunk_type": "image_ocr", "doc_id": rid,
+            "chunk_hash": _chunk_hash(text), "section_title": title}))
+        _fts_sync(rid, doc_name, "checksheet", machine_model, title, text)
+    if docs:
+        VectorStoreIndex(docs, storage_context=ctx, show_progress=False)
+        total += len(docs)
 
     qdrant_client.close()
     return total

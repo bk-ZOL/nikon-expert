@@ -439,6 +439,8 @@ def main():
     ap.add_argument("--force", action="store_true", help="忽略状态，全量重新下载")
     ap.add_argument("--suffix", default="",
                     help="配合 --reingest：只重新摄入这种后缀的文件（如 .xlsx），同名只做一次，跳过故障履历目录")
+    ap.add_argument("--names", default="",
+                    help="配合 --reingest：只重新摄入名单文件（每行一个文件名）里的文件，同名只做一次")
     ap.add_argument("--legacy", action="store_true",
                     help="配合 --reingest：只重新摄入老 Office 格式（扩展名 .xlsx/.docx、实际是 OLE）的文件，同名只做一次。"
                          "这批文件在加转换逻辑之前已被记成已同步，WPS 里不改就不会重跑")
@@ -449,12 +451,17 @@ def main():
             sys.exit(f"镜像目录不存在: {MIRROR}")
         stats = {"ingested": 0, "failed": 0, "skipped": 0}
         done = set()
+        only = {l.strip() for l in Path(args.names).read_text().splitlines() if l.strip()} if args.names else None
         for p in sorted(MIRROR.rglob("*")):
             if not p.is_file() or p.name.startswith("."):
                 continue
             if p.suffix.lower() not in INGESTABLE_SUFFIXES:
                 stats["skipped"] += 1
                 continue
+            if only is not None:
+                if p.name not in only or p.name in done or "［Driver］" in str(p):
+                    continue
+                done.add(p.name)
             if args.suffix:
                 if p.suffix.lower() != args.suffix.lower() or "［Driver］" in str(p) or p.name in done \
                         or map_dir(str(p.relative_to(MIRROR)))[0] == "fault_history":

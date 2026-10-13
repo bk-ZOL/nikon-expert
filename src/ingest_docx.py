@@ -13,7 +13,7 @@ load_dotenv()
 from src.ingestor import (
     _doc_id, _chunk_hash, _get_storage,
     _delete_existing, _fts_sync, _fts_delete_by_name,
-    _split_by_headings,
+    _split_by_headings, office_image_ocr,
 )
 
 
@@ -46,7 +46,8 @@ def ingest_docx(
     print(f"\n📄 摄入 docx：{path.name}")
 
     text = docx_to_markdown(str(path))
-    if not text or len(text) < 10:
+    ocr = office_image_ocr(path, len(text or ""))      # 正文很少的（内容是截图）：截图 OCR
+    if (not text or len(text) < 10) and not ocr:
         print("  ⚠️  未提取到文本，跳过")
         return 0
 
@@ -61,7 +62,8 @@ def ingest_docx(
     _fts_delete_by_name(doc_name)
 
     parent_chunk_size = int(os.getenv("PARENT_CHUNK_SIZE", "1024"))
-    sections = _split_by_headings(text, max_chunk=parent_chunk_size)
+    sections = _split_by_headings(text, max_chunk=parent_chunk_size) if text and len(text) >= 10 else []
+    sections += ocr
 
     docs = []
     for sec_title, sec_text in sections:
