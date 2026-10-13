@@ -6,7 +6,8 @@
      重复页按低分辨率渲染指纹只读一次。
   2) 服务器：把编号合并进全文索引每页的「【OCR标签】」段（与 OCR 结果取并集）
      scp /tmp/vg.json root@<服务器>:/tmp/ && .venv/bin/python scripts/vector_glyph_read.py apply --json /tmp/vg.json --doc 已融合 [--dry]
-     原 OCR 段先备份到 data/vector_glyph_backup_<时间>.json；合并后重建编号索引：
+     原 OCR 段先备份到 data/vector_glyph_backup_<时间>.json；重跑新版结果时加 --restore <上次的备份>，
+     先恢复成只有 OCR 的原样再合并，免得上一版读错的号留在库里。合并后重建编号索引：
      .venv/bin/python scripts/build_diagram_index.py --full
 """
 import argparse
@@ -80,19 +81,24 @@ def cmd_apply(a):
         sys.exit(f"--doc 要恰好对上一份电路图，现在对上 {len(names)} 份：{names}")
     if names[0] != data["pdf"]:
         sys.exit(f"JSON 是 {data['pdf']} 的结果，和 {names[0]} 对不上")
+    restore = json.loads(Path(a.restore).read_text()) if a.restore else {}
     rows = {}
     for rowid, title, text in con.execute("select rowid, section_title, text from doc_fts "
                                           "where doc_type='circuit_diagram' and doc_name=?", (names[0],)):
         m = re.search(r"(\d+)", title or "")
         if m:
-            rows[int(m.group(1))] = (rowid, text or "")
+            text = text or ""
+            if str(rowid) in restore:            # 先恢复成上次合并前的原样（只有 OCR），去掉上一版矢量结果
+                head = text.partition(OCR_MARK)[0].rstrip("\n")
+                text = head if restore[str(rowid)] is None else head + "\n" + OCR_MARK + restore[str(rowid)]
+            rows[int(m.group(1))] = (rowid, text)
     changes, added = {}, 0
     for p, (rowid, text) in rows.items():
         vt = set(data["pages"].get(str(p), []))
         head, mark, ocr = text.partition(OCR_MARK)
         old = set(ocr.split())
         new = old | vt
-        if new != old:
+        if new != old or str(rowid) in restore:
             changes[rowid] = (ocr if mark else None, head.rstrip("\n") + "\n" + OCR_MARK + " ".join(sorted(new)))
             added += len(new - old)
     print(f"{names[0]}：全文索引 {len(rows)} 页，要更新 {len(changes)} 页，新增编号 {added} 个")
@@ -120,6 +126,7 @@ if __name__ == "__main__":
     ap_.add_argument("--json", required=True)
     ap_.add_argument("--doc", required=True)
     ap_.add_argument("--dry", action="store_true")
+    ap_.add_argument("--restore", default="", help="上次 apply 的备份 JSON：先恢复成合并前的原样再合并（重跑新版结果时用）")
     a = ap.parse_args()
     a.pdf = os.path.expanduser(getattr(a, "pdf", "") or "")
     {"read": cmd_read, "apply": cmd_apply}[a.cmd](a)

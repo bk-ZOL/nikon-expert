@@ -18,6 +18,7 @@ import numpy as np
 G = 16                                       # 网格：字高 16 格，外加一圈边
 TEMPLATES = Path(__file__).with_name("glyph_templates.npz")
 HOLES = {**{ch: 1 for ch in "0469ADOPRQ"}, "B": 2, "8": 2}
+_DIGIT = {"D": "0", "O": "0", "I": "1", "B": "8", "S": "5", "Z": "2", "G": "6"}   # 数字位置上的形近字母
 
 
 def expected_holes(ch: str) -> int:
@@ -274,9 +275,24 @@ class Reader:
             ch = "D" if left_stem(a) else "0"
         return ch
 
+    def word(self, w) -> str:
+        """读一个词。像接插件号的（第 1 字 J/P 或认不出，后面 4 位是数字）再按格式校正：
+        4 位数字的位置上形近字母换回数字（S206D 第 3 卷的 0 中间带一笔、左边是直的，会被当成 D）；
+        只有开头认不出时，没有洞的是 J、一个洞的是 P（S206D 第 3 卷的 J 没有顶上那一横）。"""
+        cs = w["chars"]
+        s = [self.char(c, w) for c in cs]
+        if len(s) >= 5 and s[0] in "JP?":
+            digits = [_DIGIT.get(ch, ch) for ch in s[1:5]]
+            if all(ch.isdigit() for ch in digits):
+                s[1:5] = digits
+                if s[0] == "?":
+                    h = holes(cs[0])
+                    s[0] = "J" if h == 0 else "P" if h == 1 else "?"
+        return "".join(s)
+
     def page_words(self, page) -> list:
         """一页上读出的所有词（认不出的字为 "?"）。"""
-        return ["".join(self.char(c, w) for c in w["chars"]) for w in words(glyphs(page))]
+        return [self.word(w) for w in words(glyphs(page))]
 
     def page_tokens(self, page) -> set:
         """一页上读出的编号（按 diagram_config 的编号规则，和 OCR 同一套）。"""
