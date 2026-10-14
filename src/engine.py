@@ -688,7 +688,10 @@ def _agent_query_stream(question: str, history: list = None):
             yield f"　↳ {out}…\n", False, [], [], True
         elif kind == "answer":
             final = ev
-            yield "\n---\n\n" + ev["text"], False, [], [], True
+            text = (ev["text"] or "").strip()
+            if not text:   # 模型只吐了工具调用标记（已被过滤）、没写结论
+                text = "⚠️ 这一轮没整理出结论（模型输出异常）。上面是已查到的线索，请再发一次问题。"
+            yield "\n---\n\n" + text, False, [], [], True
         elif kind == "error":
             yield f"\n\n⚠️ Agent 执行出错：{ev['error']}", True, [], [], False
             return
