@@ -458,3 +458,17 @@ body, gradio-app, .gradio-container, .dark body, .dark .gradio-container{ color:
 .chatbot .prose.chatbot.md, .chatbot .message-content, .message-wrap .prose { opacity: 1 !important; }
 .chatbot .message .prose *:not(a):not(code),
 .chatbot .message-text, .chatbot .md *:not(a):not(code) { color: #2B2B26 !important; }
+
+/* ── 版面铺满浏览器（2026-10-14 用户要求）──────────────────
+   原来外框最宽 860px、阅读栏 740px，宽屏只占中间 2/3；侧栏收起后文字也不变宽。
+   现在内容随浏览器宽度走，两边留 32px；侧栏展开让出 280px，收起只让 64px 图标栏。 */
+:root, .dark { --nk-col: 100%; }
+.gradio-container { max-width: none !important; width: 100% !important;
+  padding-left: 32px !important; padding-right: 32px !important; box-sizing: border-box !important; }
+@media (min-width: 769px) {
+  .sidebar-parent:has(#nk-side-wrap.open)       { padding-left: 280px !important; }
+  .sidebar-parent:has(#nk-side-wrap:not(.open)) { padding-left: 64px !important; }
+}
+@media (max-width: 768px) {
+  .gradio-container { padding-left: 12px !important; padding-right: 12px !important; }
+}

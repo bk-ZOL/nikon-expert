@@ -918,8 +918,8 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
     nav_admin.click(lambda: _switch_view("admin"), None, _nav_out).then(
         do_admin_report, None, [admin_status, admin_perms, admin_log])
     admin_refresh_btn.click(do_admin_report, None, [admin_status, admin_perms, admin_log])
-    # 对齐 preview:侧栏只保留 4 项,审计不在导航里显示(视图/权限逻辑保留,日后需要可放开下一行)
-    # demo.load(_reveal_admin, None, [nav_admin])
+    # 审计按钮默认隐藏，页面加载时只给管理员/审计员放出（2026-10-14 用户要求恢复）
+    demo.load(_reveal_admin, None, [nav_admin])
     new_btn.click(lambda: _switch_view("chat") + [[], "", ""],
                   None, _nav_out + [chatbot, question, citation_buttons])
 
