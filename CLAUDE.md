@@ -137,6 +137,19 @@
 - **连服务器偶尔超时**：Mac 到 Tailscale 地址时通时不通（`tailscale ping` 通、SSH 超时），过一会儿自己好；急用可以走公网 `root@149.28.19.161`（密钥登录可用）。
 - `pgrep -f` 匹配到自己的坑又踩了一次：检查后台任务用 `pgrep -f 'reingest --suffi[x]'` 这种写法。
 
+## 8.6 2026-10-14 网页（ui/app.py）改动和踩坑
+
+- **智能体工具拿不到登录身份**：LlamaIndex 用 `loop.run_in_executor` 跑同步工具，线程池不带 contextvars；`tools._memo` 里的 `call_with_timeout` 又开了一层线程。两处都补了（`build_tools` 建工具时记下用户再绑回去，`util_timeout` 用 `copy_context`）。**以后新开线程跑检索，一律带上 contextvars。**
+- **Gradio 6 聊天记录**：`content` 是 `[{"type":"text","text":…}]` 列表，多轮后还会嵌套，用 `agent.history_text()` 取文字。
+- **Gradio 自定义 CSS 会被自动加前缀** `.gradio-container .contain`：`.contain` 外层的元素（如侧栏外面那层 `.wrap`）要写成 `.gradio-container …` 开头，且**不能写在 `@media` 里**（`@media` 内一律加前缀），手机/电脑区分用 `clamp(…, calc((100vw - 768px) * 1000), …)`。`.sidebar-parent` 类名不稳定，别依赖。
+- **`demo.load(js=…)` 在 6.9 上不执行**，页面脚本改用 `launch(head=_HEAD_JS)`。
+- 实时状态：`src/progress.py`，各阶段 `report()`，网页每秒刷新一行 `⏳ … · 已用 N 秒`。进度对象要作为参数交给检索线程再 `bind()`：Gradio 每推进一步生成器都复制一次上下文，在 `chat()` 里设 contextvar 下一步就丢。
+- 多步排查实时显示：`agent.ReActStreamParser` 把 ReAct 原始流拆成 💭 思考（每步最多 150 字，遇「**【」收起——DeepSeek 常把整篇结论塞进 Thought）和逐字结论；DSML 工具调用标记截断。
+- 客户脱敏：`src/desensitize.py`，名单复用 `acl_classify.CUSTOMER_DICT`（客户A/B/C…），只改网页显示，不改库。
+- 参考来源按文件合并（`SourceCollector._groups`）。普通问答（非智能体）的引用编号对应上下文段落，没合并。
+- 版面铺满浏览器；手机侧栏默认收起、展开为浮层；管理员「审计」入口已恢复。
+- 从国内连 Vultr 很慢（往返约 290ms，首页 4~17 秒，偶尔 60 秒以上），浏览器端测试常超时；功能验证优先在服务器本机调 `ui/app.py` 的 `chat()`。
+
 ## 9. 用户的习惯
 
 - 中文交流，不喜欢"AI 味"，回答要口语、直白。
