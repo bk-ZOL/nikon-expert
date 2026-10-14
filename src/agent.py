@@ -62,7 +62,8 @@ def history_text(content) -> str:
     if isinstance(content, dict):
         content = [content]
     if isinstance(content, (list, tuple)):
-        return "\n".join(b.get("text", "") if isinstance(b, dict) else (b if isinstance(b, str) else "")
+        # 多轮后会出现嵌套：{'type':'text','text':[{'type':'text',...}]}，递归取文字
+        return "\n".join(history_text(b.get("text", "")) if isinstance(b, dict) else history_text(b)
                          for b in content).strip()
     return ""
 
