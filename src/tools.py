@@ -4,6 +4,7 @@
 # 每个工具在返回给 LLM 文本的同时，把命中的资料记入 SourceCollector，
 # 供最终答案统一引用（与 engine._build_context 的 citations_data 结构对齐）。
 
+import functools
 from pathlib import Path
 from typing import List
 
@@ -212,12 +213,21 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
             return _trace(query, max_hops=2, max_lines=40)
         return _memo("netlist_trace", query, run)
 
-    return [
-        FunctionTool.from_defaults(fn=error_code_lookup),
-        FunctionTool.from_defaults(fn=keyword_search),
-        FunctionTool.from_defaults(fn=semantic_search),
-        FunctionTool.from_defaults(fn=fault_history_lookup),
-        FunctionTool.from_defaults(fn=inspect_diagram),
-        FunctionTool.from_defaults(fn=trace_connection),
-        FunctionTool.from_defaults(fn=netlist_trace),
-    ]
+    # LlamaIndex 用 loop.run_in_executor 跑同步工具，线程池不带 contextvars，
+    # ACL 登录身份会丢（工具里报 no valid identity）。建工具时记下当前用户，执行时绑回去。
+    from src import acl
+    _user = acl.get_current_user()
+
+    def _with_user(fn):
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            tok = acl.set_current_user(_user)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                acl.reset_current_user(tok)
+        return wrapped
+
+    return [FunctionTool.from_defaults(fn=_with_user(f)) for f in (
+        error_code_lookup, keyword_search, semantic_search, fault_history_lookup,
+        inspect_diagram, trace_connection, netlist_trace)]

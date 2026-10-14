@@ -68,6 +68,20 @@ def history_text(content) -> str:
     return ""
 
 
+_DSML_RE = None
+
+
+def _strip_dsml(text: str) -> str:
+    """DeepSeek 偶尔不走工具调用接口，把调用当文字吐出（<｜DSML｜invoke ...>），显示前去掉。"""
+    global _DSML_RE
+    if "DSML" not in text:
+        return text
+    import re
+    if _DSML_RE is None:
+        _DSML_RE = re.compile(r"<[｜|]+\s*DSML\s*[｜|]+.*", re.S)   # 从第一个 DSML 标记起全部丢弃
+    return _DSML_RE.sub("", text).rstrip(" \n-")
+
+
 def _to_chat_history(history):
     """把 UI 的 [{'role','content'},...] 转成 ChatMessage 列表（取最近几轮）。"""
     if not history:
@@ -115,7 +129,7 @@ async def _agent_events(question: str, history=None):
 
     resp = await handler
     yield {"kind": "answer",
-           "text": str(resp),
+           "text": _strip_dsml(str(resp)),
            "citations": collector.citations(),
            "citations_data": collector.citations_data(),
            "has_result": collector.has_any()}
