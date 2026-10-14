@@ -93,7 +93,7 @@ def _track(request, action: str) -> None:
         pass
 
 
-def _stream_with_watchdog(question, mode, history, idle=60, total=360):
+def _stream_with_watchdog(question, mode, history, idle=60, total=360, prog=None):
     """看门狗包装：把 query_stream 丢到后台线程，主循环带超时地拉取。
     任何下游卡死（LLM 停顿/工具无响应/检索死锁）→ idle 秒无新数据即判超时，
     给出提示并结束，绝不让界面无限转圈。用 copy_context 把 ACL 身份带进线程。
@@ -107,6 +107,9 @@ def _stream_with_watchdog(question, mode, history, idle=60, total=360):
     DONE = object()
 
     def pump():
+        if prog is not None:
+            from src import progress
+            progress.bind(prog)   # 在检索线程里绑定，各阶段 report() 写进同一个对象
         try:
             for item in backend.query_stream(question, mode=mode, history=history):
                 out.put(("data", item))
@@ -119,13 +122,20 @@ def _stream_with_watchdog(question, mode, history, idle=60, total=360):
 
     ctx = contextvars.copy_context()
     threading.Thread(target=lambda: ctx.run(pump), daemon=True).start()
-    start = _t.time()
+    start = last = _t.time()
     while True:
         try:
-            kind, payload = out.get(timeout=idle)
+            kind, payload = out.get(timeout=1)
         except _q.Empty:
-            yield ("timeout", "idle")
-            return
+            if _t.time() - last > idle:
+                yield ("timeout", "idle")
+                return
+            yield ("tick", None)   # 每秒一次：让界面刷新状态行和计时
+            if _t.time() - start > total:
+                yield ("timeout", "total")
+                return
+            continue
+        last = _t.time()
         if kind is DONE:
             return
         yield (kind, payload)
@@ -144,9 +154,18 @@ def chat(question: str, history: list, request: gr.Request = None):
     mode_key = auto_mode(question)
     history = history or []
 
+    from src import progress
+    prog = progress.Progress()   # 交给检索线程，各阶段往里报进度，这里每秒读一次
+
+    def _status():
+        return f"_⏳ {prog.stage} · 已用 {prog.elapsed()} 秒_"
+
+    def _show(body):
+        return (body + "\n\n" + _status()) if body else _status()
+
     new_history = history + [
         {"role": "user", "content": question},
-        {"role": "assistant", "content": "🔍 正在检索知识库…"},
+        {"role": "assistant", "content": _show("")},
     ]
     yield new_history, "", ""   # 即时心跳：检索/首字前先显示活动，避免"像卡住"
 
@@ -163,7 +182,11 @@ def chat(question: str, history: list, request: gr.Request = None):
     citations_data = []
     problem = None
     try:
-        for kind, payload in _stream_with_watchdog(question, mode_key, history):
+        for kind, payload in _stream_with_watchdog(question, mode_key, history, prog=prog):
+            if kind == "tick":
+                new_history[-1]["content"] = _show(accumulated)
+                yield new_history, "", ""
+                continue
             if kind == "timeout":
                 problem = ("⏱️ 响应超时——后端可能临时卡住或网络中断，已中断本次。稍等重发一般就好；"
                            "若频繁如此多为大脑/工具临时无响应。" if payload == "idle"
@@ -184,9 +207,10 @@ def chat(question: str, history: list, request: gr.Request = None):
                 else:
                     # 最终 delta 可能带错误提示（如 Agent 出错），不能被已累积的进度文字吞掉
                     new_history[-1]["content"] = accumulated + delta
+                new_history[-1]["content"] += f"\n\n_⏱ 用时 {prog.elapsed()} 秒_"
             else:
                 accumulated += delta
-                new_history[-1]["content"] = accumulated
+                new_history[-1]["content"] = _show(accumulated)
             yield new_history, "", ""
         if problem:
             new_history[-1]["content"] = (accumulated + "\n\n" + problem) if accumulated else problem

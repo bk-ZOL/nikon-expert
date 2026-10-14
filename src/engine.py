@@ -442,6 +442,8 @@ def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
 
     # ── 2. FTS 检索 (Karpathy 层)
     fts_results = []
+    from src.progress import report
+    report("全文检索：在手册、履历里找关键词")
     try:
         fts_query = question
         # 精确匹配 Error Code
@@ -468,6 +470,7 @@ def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
         pass
 
     # ── 3. 语义检索 (Gbrain 层)：按请求注入 ACL filter，失败则 fail-closed
+    report(f"语义检索：找意思相近的资料（关键词已命中 {len(fts_results)} 条）")
     semantic_results = []
     try:
         nodes = _retrieve_semantic(eng, question, user, top_k)
@@ -483,6 +486,7 @@ def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
                          demote_circuit=not is_circuit_query(question))
 
     # ── 5. Rerank 精排：把语义蹭词但不相关的挤掉，只留最相关的 rerank_top_n 条
+    report(f"精排：从 {len(pool)} 条候选里挑最相关的（这一步一般要 10~20 秒）")
     merged = _rerank(question, pool, rerank_top_n)
     return merged, qtype
 
@@ -666,6 +670,17 @@ def _build_context(merged_results: list, mode: str = "qa") -> tuple:
     return context, citations, citations_data, True
 
 
+_TOOL_LABELS = {
+    "error_code_lookup": "查错误码",
+    "keyword_search": "关键词搜资料",
+    "semantic_search": "按意思搜资料",
+    "fault_history_lookup": "查故障履历",
+    "inspect_diagram": "看电路图",
+    "trace_connection": "在电路图里追线",
+    "netlist_trace": "按线表追线",
+}
+
+
 def _agent_query_stream(question: str, history: list = None):
     """把 ReAct agent 的事件流适配成 query_stream 的 5 元组契约。
 
@@ -674,12 +689,20 @@ def _agent_query_stream(question: str, history: list = None):
     final：给出去重后的引用。
     """
     from src.agent import run_agent_sync
+    from src.progress import report
 
     yield "🔍 **多步排查中……**\n\n", False, [], [], True
+    report("多步排查：大脑在规划先查什么")
 
     final = None
+    step = 0
     for ev in run_agent_sync(question, history):
         kind = ev["kind"]
+        if kind == "tool_call":
+            step += 1
+            report(f"多步排查第 {step} 步：{_TOOL_LABELS.get(ev['tool'], ev['tool'])}")
+        elif kind == "observation":
+            report(f"多步排查：第 {step} 步查完，大脑在分析结果、决定下一步")
         if kind == "tool_call":
             args = "，".join(f"{k}={v}" for k, v in ev["args"].items())
             yield f"🔧 `{ev['tool']}`（{args}）\n", False, [], [], True
@@ -742,7 +765,13 @@ def query_stream(question: str, mode: str = "qa", history: list = None, user=Non
         prompt_tmpl = TROUBLESHOOTING_PROMPT if mode == "troubleshoot" else KNOWLEDGE_QA_PROMPT
         final_prompt = prompt_tmpl.format(context=context, query=history_prefix + question)
 
+        from src.progress import report
+        report(f"整理答案：参考 {len(citations)} 份资料，大脑思考中")
+        first = True
         for token in Settings.llm.stream_complete(final_prompt):
+            if first:
+                report("正在输出答案")
+                first = False
             yield token.delta, False, [], [], True
 
         yield "", True, citations, citations_data, True
