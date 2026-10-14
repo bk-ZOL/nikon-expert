@@ -19,6 +19,7 @@ load_dotenv()
 import pandas as pd
 import requests as _requests
 import gradio as gr
+from src.desensitize import mask as _mask
 from ui.client import BackendClient
 from nikon_theme import nikon_theme
 
@@ -144,6 +145,16 @@ def _stream_with_watchdog(question, mode, history, idle=60, total=360, prog=None
             return
 
 
+def _masked(history: list) -> list:
+    """回给界面前把最后一条回答里的客户名换成代号（只改显示，检索照常用真名）。"""
+    if not history or history[-1].get("role") != "assistant":
+        return history
+    last = dict(history[-1])
+    if isinstance(last.get("content"), str):
+        last["content"] = _mask(last["content"])
+    return history[:-1] + [last]
+
+
 def chat(question: str, history: list, request: gr.Request = None):
     if not question.strip():
         yield (history or []), "", ""
@@ -167,14 +178,14 @@ def chat(question: str, history: list, request: gr.Request = None):
         {"role": "user", "content": question},
         {"role": "assistant", "content": _show("")},
     ]
-    yield new_history, "", ""   # 即时心跳：检索/首字前先显示活动，避免"像卡住"
+    yield _masked(new_history), "", ""   # 即时心跳：检索/首字前先显示活动，避免"像卡住"
 
     # 绑定登录用户到 contextvar：本地模式下引擎深处（含 agent 工具）据此按 ACL 过滤
     try:
         _user = _resolve_login_user(request)
     except acl.PermissionDenied:
         new_history[-1]["content"] = "⛔ 未识别到登录身份，无法检索。请重新登录。"
-        yield new_history, "", ""
+        yield _masked(new_history), "", ""
         return
     _tok = acl.set_current_user(_user)
 
@@ -185,7 +196,7 @@ def chat(question: str, history: list, request: gr.Request = None):
         for kind, payload in _stream_with_watchdog(question, mode_key, history, prog=prog):
             if kind == "tick":
                 new_history[-1]["content"] = _show(accumulated)
-                yield new_history, "", ""
+                yield _masked(new_history), "", ""
                 continue
             if kind == "timeout":
                 problem = ("⏱️ 响应超时——后端可能临时卡住或网络中断，已中断本次。稍等重发一般就好；"
@@ -211,16 +222,16 @@ def chat(question: str, history: list, request: gr.Request = None):
             else:
                 accumulated += delta
                 new_history[-1]["content"] = _show(accumulated)
-            yield new_history, "", ""
+            yield _masked(new_history), "", ""
         if problem:
             new_history[-1]["content"] = (accumulated + "\n\n" + problem) if accumulated else problem
-            yield new_history, "", ""
+            yield _masked(new_history), "", ""
             return
     finally:
         acl.reset_current_user(_tok)
 
     cit_html = _build_citation_buttons(citations_data)
-    yield new_history, "", cit_html
+    yield _masked(new_history), "", cit_html
 
 
 def _build_citation_buttons(citations_data: list) -> str:
@@ -233,7 +244,7 @@ def _build_citation_buttons(citations_data: list) -> str:
         cite_text = c.get("cite_text", "")
         if not cite_text:
             continue
-        safe_text = _html.escape(cite_text)
+        safe_text = _html.escape(_mask(cite_text))   # 显示文字脱敏客户名，链接仍指向真实文件
         fp_low = fp.lower() if fp else ""
         if fp and fp_low.endswith(".pdf"):
             pdf_url = f"/serve-pdf?path={_html.escape(_requests.utils.quote(fp, safe=''))}"
@@ -942,11 +953,15 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
 
     # 页面加载：手机点导航后自动收起抽屉
     demo.load(js="""() => {
+      // 手机（≤768px）：侧栏平时收成图标栏，展开时是浮层抽屉；打开页面和点导航后都自动收起
       function closeDrawer() {
-        if (window.innerWidth > 640) return;
-        const mt = document.querySelector('.menu-toggle-button');
-        if (mt) mt.click();
+        if (window.innerWidth > 768) return;
+        const s = document.querySelector('#nk-side-wrap');
+        if (!s || !s.classList.contains('open')) return;
+        const t = s.querySelector('.toggle-button') || document.querySelector('.menu-toggle-button');
+        if (t) t.click();
       }
+      setTimeout(closeDrawer, 300);
       document.body.addEventListener('click', (e) => {
         if (e.target.closest('.nk-navbtn, .nk-newbtn')) setTimeout(closeDrawer, 90);
         // 注意:收起按钮 .nk-collapse 的折叠由其内联 onclick 处理,这里不再重复(否则触发两次=没动)

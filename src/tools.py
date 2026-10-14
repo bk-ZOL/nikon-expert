@@ -49,14 +49,55 @@ class SourceCollector:
         fp = r.get("file_path", "")
         return f"{doc_name}" + (f"（{Path(fp).parent.name}）" if fp else "")
 
+    def _groups(self) -> list:
+        """按文档合并命中：同一份文件命中多段/多行/多页时只列一次（2026-10-14 用户反馈来源重复）。"""
+        groups, by_name = [], {}
+        for r in self._items:
+            name = r.get("doc_name", "未知文档")
+            if name not in by_name:
+                by_name[name] = {"first": r, "items": []}
+                groups.append(by_name[name])
+            by_name[name]["items"].append(r)
+        return groups
+
+    @staticmethod
+    def _join(vals) -> str:
+        out = []
+        for v in vals:
+            v = str(v).strip()
+            if v and v not in out:
+                out.append(v)
+        return "、".join(out)
+
+    def _group_text(self, g: dict) -> str:
+        items, r = g["items"], g["first"]
+        if len(items) == 1:
+            return self._cite_text(r)
+        doc_name = r.get("doc_name", "未知文档")
+        doc_type = r.get("doc_type", "")
+        if doc_type == "manual":
+            pages = self._join(i.get("page_start", "") for i in items)
+            if pages:
+                return f"《{doc_name}》第 {pages} 页"
+            secs = self._join(i.get("section_title", "") for i in items)
+            return f"《{doc_name}》— {secs}" if secs else f"《{doc_name}》"
+        if doc_type == "fault_history":
+            dates = self._join(i.get("fault_date", "") for i in items)
+            return f"故障履历 — {doc_name}" + (f"（{dates}）" if dates else "")
+        if doc_type == "checksheet":
+            rows = self._join(i.get("row_index", "") for i in items)
+            return f"《{doc_name}》第 {rows} 行" if rows else f"《{doc_name}》"
+        return self._cite_text(r)
+
     def citations(self) -> list:
-        """返回展示用引用字符串列表 [ '[1] xxx', ... ]"""
-        return [f"[{i}] {self._cite_text(r)}" for i, r in enumerate(self._items, 1)]
+        """返回展示用引用字符串列表 [ '[1] xxx', ... ]（同一文件合并为一条）"""
+        return [f"[{i}] {self._group_text(g)}" for i, g in enumerate(self._groups(), 1)]
 
     def citations_data(self) -> list:
-        """返回结构化引用，供 UI 构建可点击按钮（与 engine 对齐）。"""
+        """返回结构化引用，供 UI 构建可点击按钮（与 engine 对齐；同一文件合并为一条，指向首个命中）。"""
         out = []
-        for i, r in enumerate(self._items, 1):
+        for i, g in enumerate(self._groups(), 1):
+            r = g["first"]
             page = r.get("page_start", "")
             out.append({
                 "index": i,
@@ -66,7 +107,7 @@ class SourceCollector:
                 "page": int(page) if str(page).isdigit() else None,
                 "section": r.get("section_title", ""),
                 "source": r.get("_tool", ""),
-                "cite_text": self._cite_text(r),
+                "cite_text": self._group_text(g),
             })
         return out
 

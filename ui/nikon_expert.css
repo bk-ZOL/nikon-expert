@@ -471,11 +471,17 @@ body, gradio-app, .gradio-container, .dark body, .dark .gradio-container{ color:
    ".gradio-container .contain"，而侧栏外层的 .wrap 在 .contain 外层，规则永远匹配不上。
    不用 .sidebar-parent 类名：Gradio 6.9 不是每次都加。.wrap:has(> .contain #nk-side-wrap) 只匹配侧栏所在那层。
    这层 .wrap 左边已被外框和 main 的内边距推进 64px，所以展开时再让 240px（=280+24-64），收起时让 24px。
-   手机（≤768px）侧栏是覆盖式抽屉，不让位：clamp 在窄屏算出 0。 */
+   手机（≤768px）：展开是浮层抽屉不让位，收起时图标栏右边留 8px：clamp 在窄屏取下限 8px。 */
 .gradio-container .wrap:has(> .contain #nk-side-wrap.open) {
-  padding-left: clamp(0px, calc((100vw - 768px) * 1000), 240px) !important; }
+  padding-left: clamp(8px, calc((100vw - 768px) * 1000), 240px) !important; }
 .gradio-container .wrap:has(> .contain #nk-side-wrap:not(.open)) {
-  padding-left: clamp(0px, calc((100vw - 768px) * 1000), 24px) !important; }
+  padding-left: clamp(8px, calc((100vw - 768px) * 1000), 24px) !important; }
 @media (max-width: 768px) {
   .gradio-container { padding-left: 12px !important; padding-right: 12px !important; }
+  /* 手机展开：完整从左边滑出、浮在正文上（Gradio 默认把它推到 -100vw，配上 280px 宽度会露半截盖住正文） */
+  #nk-side-wrap.sidebar.open {
+    left: 0 !important; right: auto !important; transform: none !important;
+    width: 280px !important; max-width: 85vw !important; z-index: 1000 !important;
+    box-shadow: 4px 0 24px rgba(43,43,38,.18) !important;
+  }
 }
