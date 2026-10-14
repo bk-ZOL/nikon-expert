@@ -688,35 +688,86 @@ def _agent_query_stream(question: str, history: list = None):
     非 final：把「推理轨迹（工具调用/观察）+ 最终答案」作为 delta 累积显示；
     final：给出去重后的引用。
     """
-    from src.agent import run_agent_sync
+    from src.agent import run_agent_sync, ReActStreamParser
     from src.progress import report
 
     yield "🔍 **多步排查中……**\n\n", False, [], [], True
     report("多步排查：大脑在规划先查什么")
 
+    parser = ReActStreamParser()
     final = None
     step = 0
+    thought_open = False   # 当前这行 💭 还没换行
+    answer_open = False    # 已经开始逐字输出结论
+
+    def show(pieces):
+        """把解析出的思考/结论片段变成要追加到界面上的文字。"""
+        nonlocal thought_open, answer_open
+        out = ""
+        for kind, text in pieces:
+            if kind == "thought":
+                text = text.replace("\n", " ")
+                if not thought_open:
+                    text = text.lstrip()
+                    if not text:
+                        continue
+                    out += "💭 "
+                    thought_open = True
+                out += text
+            else:
+                if thought_open:
+                    out += "\n"
+                    thought_open = False
+                if not answer_open:
+                    out += "\n---\n\n"
+                    answer_open = True
+                    report("正在输出结论")
+                out += text
+        return out
+
+    def close_thought():
+        nonlocal thought_open
+        if thought_open:
+            thought_open = False
+            return "\n"
+        return ""
+
     for ev in run_agent_sync(question, history):
         kind = ev["kind"]
+        if kind == "stream":
+            text = show(parser.feed(ev["delta"]))
+            if text:
+                yield text, False, [], [], True
+            continue
+        if kind == "step":
+            text = show(parser.flush()) + close_thought()
+            parser.reset()
+            if text:
+                yield text, False, [], [], True
+            continue
         if kind == "tool_call":
             step += 1
             report(f"多步排查第 {step} 步：{_TOOL_LABELS.get(ev['tool'], ev['tool'])}")
+            args = "，".join(f"{k}={v}" for k, v in ev["args"].items())
+            yield show(parser.flush()) + close_thought() + f"🔧 `{ev['tool']}`（{args}）\n", False, [], [], True
         elif kind == "observation":
             report(f"多步排查：第 {step} 步查完，大脑在分析结果、决定下一步")
-        if kind == "tool_call":
-            args = "，".join(f"{k}={v}" for k, v in ev["args"].items())
-            yield f"🔧 `{ev['tool']}`（{args}）\n", False, [], [], True
-        elif kind == "observation":
             out = (ev["output"] or "").strip().replace("\n", " ")[:100]
             yield f"　↳ {out}…\n", False, [], [], True
         elif kind == "answer":
             final = ev
-            text = (ev["text"] or "").strip()
-            if not text:   # 模型只吐了工具调用标记（已被过滤）、没写结论
-                text = "⚠️ 这一轮没整理出结论（模型输出异常）。上面是已查到的线索，请再发一次问题。"
-            yield "\n---\n\n" + text, False, [], [], True
+            tail = show(parser.flush())
+            if parser.answer_started and parser.answer_text.strip():
+                if tail:
+                    yield tail, False, [], [], True   # 结论已经逐字输出过，不再重复贴
+            else:
+                text = (ev["text"] or "").strip()
+                if not text:   # 模型只吐了工具调用标记（已被过滤）、没写结论
+                    text = "⚠️ 这一轮没整理出结论（模型输出异常）。上面是已查到的线索，请再发一次问题。"
+                prefix = "" if answer_open else close_thought() + "\n---\n\n"
+                yield tail + prefix + text, False, [], [], True
         elif kind == "error":
-            yield f"\n\n⚠️ Agent 执行出错：{ev['error']}", True, [], [], False
+            yield close_thought() + f"\n\n⚠️ Agent 执行出错：{ev['error']}", True, [], [], False
             return
 
     if final:

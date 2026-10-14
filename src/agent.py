@@ -11,7 +11,7 @@ import traceback
 import contextvars
 
 from llama_index.core.agent.workflow import (
-    ReActAgent, AgentStream, ToolCall, ToolCallResult,
+    ReActAgent, AgentStream, AgentInput, ToolCall, ToolCallResult,
 )
 
 from src.tools import build_tools, SourceCollector
@@ -82,6 +82,91 @@ def _strip_dsml(text: str) -> str:
     return _DSML_RE.sub("", text).rstrip(" \n-")
 
 
+class ReActStreamParser:
+    """把 ReAct 的原始流（"Thought: …\nAction: …" / "Thought: …\nAnswer: …"）拆成可显示的片段。
+
+    feed(delta) 返回 [(kind, text), …]，kind 为 "thought"（思考）或 "answer"（结论）。
+    - Action / Action Input 不显示（界面另有 🔧 行）；一步里出现第一个 Action 后，本步剩余内容都丢弃
+      （模型常常一口气写好几组 Thought/Action，只有第一组会真正执行）。
+    - 末尾扣住 HOLD 个字符再放，免得把 "Action"/"Answer" 关键字或 DSML 标记的前半截先显示出去。
+    - 结论里一旦出现 DSML 工具调用标记，就截断、不再输出。
+    """
+    HOLD = 12
+    _STOP_THOUGHT = ("\nAction:", "Action:", "Answer:")
+
+    def __init__(self):
+        self.answer_started = False   # 整次运行是否已开始输出结论
+        self.answer_text = ""
+        self.reset()
+
+    def reset(self):
+        self.buf = ""         # 本步累计原文
+        self.pos = 0          # 已经处理到 buf 的哪里
+        self.mode = "head"    # head（等 Thought:/Answer:）/ thought / answer / done
+
+    def _emit_upto(self, end, kind, out):
+        if end > self.pos:
+            out.append((kind, self.buf[self.pos:end]))
+            self.pos = end
+
+    def feed(self, delta: str, final: bool = False) -> list:
+        out = []
+        self.buf += delta
+        while True:
+            if self.mode == "head":
+                i_t, i_a = self.buf.find("Thought:", self.pos), self.buf.find("Answer:", self.pos)
+                if i_a != -1 and (i_t == -1 or i_a < i_t):
+                    self.pos, self.mode = i_a + len("Answer:"), "answer"
+                    continue
+                if i_t != -1:
+                    self.pos, self.mode = i_t + len("Thought:"), "thought"
+                    continue
+                if "Action:" in self.buf[self.pos:]:
+                    self.mode = "done"
+                return out
+            if self.mode == "thought":
+                hits = [(self.buf.find(k, self.pos), k) for k in self._STOP_THOUGHT]
+                hits = [(i, k) for i, k in hits if i != -1]
+                if hits:
+                    i, k = min(hits)
+                    self._emit_upto(i, "thought", out)
+                    if k == "Answer:":
+                        self.pos, self.mode = i + len(k), "answer"
+                        continue
+                    self.mode = "done"
+                    return out
+                end = len(self.buf) if final else max(self.pos, len(self.buf) - self.HOLD)
+                self._emit_upto(end, "thought", out)
+                return out
+            if self.mode == "answer":
+                if not self.answer_started:
+                    # 去掉 "Answer:" 后紧跟的空白
+                    while self.pos < len(self.buf) and self.buf[self.pos] in " \n":
+                        self.pos += 1
+                cut = min([i for i in (self.buf.find("DSML", self.pos), self.buf.find("<｜", self.pos),
+                                       self.buf.find("<|", self.pos)) if i != -1], default=-1)
+                if cut != -1:
+                    self._emit_answer(cut, out)
+                    self.mode = "done"
+                    return out
+                end = len(self.buf) if final else max(self.pos, len(self.buf) - self.HOLD)
+                self._emit_answer(end, out)
+                return out
+            return out   # done
+
+    def _emit_answer(self, end, out):
+        if end > self.pos:
+            t = self.buf[self.pos:end]
+            self.answer_started = True
+            self.answer_text += t
+            out.append(("answer", t))
+            self.pos = end
+
+    def flush(self) -> list:
+        """本步结束：把扣住的尾巴放出来。"""
+        return self.feed("", final=True)
+
+
 def _to_chat_history(history):
     """把 UI 的 [{'role','content'},...] 转成 ChatMessage 列表（取最近几轮）。"""
     if not history:
@@ -125,7 +210,11 @@ async def _agent_events(question: str, history=None):
             yield {"kind": "tool_call",
                    "tool": ev.tool_name,
                    "args": dict(ev.tool_kwargs)}
-        # AgentStream（原始 ReAct 推理 token）P1 暂不透传，避免 Thought/Action 脚手架噪声
+        elif isinstance(ev, AgentStream):
+            # 原始 ReAct 推理 token：交给 ReActStreamParser 拆出 Thought（思考）/ Answer（结论）实时显示
+            yield {"kind": "stream", "delta": ev.delta or ""}
+        elif isinstance(ev, AgentInput):
+            yield {"kind": "step"}    # 新一步开始，解析状态归零
 
     resp = await handler
     yield {"kind": "answer",
