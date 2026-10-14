@@ -468,12 +468,13 @@ body, gradio-app, .gradio-container, .dark body, .dark .gradio-container{ color:
 .gradio-container { max-width: none !important; width: 100% !important;
   padding-left: 32px !important; padding-right: 32px !important; box-sizing: border-box !important; }
 /* 注意：选择器必须以 .gradio-container 开头，且不能写在 @media 里——否则 Gradio 会自动加前缀
-   ".gradio-container .contain"，而 .sidebar-parent 在 .contain 外层，规则永远匹配不上。
-   .sidebar-parent 左边已被外框和 main 的内边距推进 64px，所以展开时再让 240px（=280+24-64），收起时让 24px。
+   ".gradio-container .contain"，而侧栏外层的 .wrap 在 .contain 外层，规则永远匹配不上。
+   不用 .sidebar-parent 类名：Gradio 6.9 不是每次都加。.wrap:has(> .contain #nk-side-wrap) 只匹配侧栏所在那层。
+   这层 .wrap 左边已被外框和 main 的内边距推进 64px，所以展开时再让 240px（=280+24-64），收起时让 24px。
    手机（≤768px）侧栏是覆盖式抽屉，不让位：clamp 在窄屏算出 0。 */
-.gradio-container .sidebar-parent:has(#nk-side-wrap.open) {
+.gradio-container .wrap:has(> .contain #nk-side-wrap.open) {
   padding-left: clamp(0px, calc((100vw - 768px) * 1000), 240px) !important; }
-.gradio-container .sidebar-parent:has(#nk-side-wrap:not(.open)) {
+.gradio-container .wrap:has(> .contain #nk-side-wrap:not(.open)) {
   padding-left: clamp(0px, calc((100vw - 768px) * 1000), 24px) !important; }
 @media (max-width: 768px) {
   .gradio-container { padding-left: 12px !important; padding-right: 12px !important; }
