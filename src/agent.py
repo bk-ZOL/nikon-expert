@@ -54,6 +54,7 @@ Step 2：... [来源：...]
 
 【思考（Thought）的写法】
 每一步的 Thought 会实时显示给现场工程师看，**一律用中文**，一两句话说清楚“刚才查到了什么、接下来查什么、为什么”，不要写英文。
+**Thought 里绝不写结论正文。** 信息够了就严格按格式输出：先写一句 `Thought: 信息已足够，给出结论。`，换行写 `Answer:`，把上面的结论模板全部写在 `Answer:` 后面。
 """
 
 
@@ -95,6 +96,7 @@ class ReActStreamParser:
     - 结论里一旦出现 DSML 工具调用标记，就截断、不再输出。
     """
     HOLD = 12
+    THOUGHT_MAX = 150     # 每步思考最多显示的字数
     _STOP_THOUGHT = ("\nAction:", "Action:", "Answer:")
 
     def __init__(self):
@@ -105,7 +107,8 @@ class ReActStreamParser:
     def reset(self):
         self.buf = ""         # 本步累计原文
         self.pos = 0          # 已经处理到 buf 的哪里
-        self.mode = "head"    # head（等 Thought:/Answer:）/ thought / answer / done
+        self.mode = "head"    # head（等 Thought:/Answer:）/ thought / muted（思考已收起）/ answer / done
+        self.thought_len = 0
 
     def _emit_upto(self, end, kind, out):
         if end > self.pos:
@@ -128,18 +131,39 @@ class ReActStreamParser:
                     self.mode = "done"
                 return out
             if self.mode == "thought":
+                # 模型有时把整篇结论塞进 Thought（没写 Answer:），框架会让它重写，界面上就会重复好几遍。
+                # 思考只显示开头一两句：到 THOUGHT_MAX 字或出现结论标题「**【」就收起（mute_at），后面静默跳过。
+                cut = self.buf.find("**【", self.pos)
+                mute_at = self.pos + max(self.THOUGHT_MAX - self.thought_len, 0)
+                if cut != -1:
+                    mute_at = min(mute_at, cut)
                 hits = [(self.buf.find(k, self.pos), k) for k in self._STOP_THOUGHT]
                 hits = [(i, k) for i, k in hits if i != -1]
-                if hits:
-                    i, k = min(hits)
-                    self._emit_upto(i, "thought", out)
-                    if k == "Answer:":
-                        self.pos, self.mode = i + len(k), "answer"
+                stop_i, stop_k = min(hits) if hits else (None, None)
+                if stop_i is not None and stop_i <= mute_at:
+                    self._emit_thought(stop_i, out)
+                    if stop_k == "Answer:":
+                        self.pos, self.mode = stop_i + len(stop_k), "answer"
                         continue
                     self.mode = "done"
                     return out
                 end = len(self.buf) if final else max(self.pos, len(self.buf) - self.HOLD)
-                self._emit_upto(end, "thought", out)
+                if mute_at < end or stop_i is not None:
+                    self._emit_thought(min(mute_at, end), out)
+                    out.append(("thought", "…"))
+                    self.mode = "muted"
+                    continue
+                self._emit_thought(end, out)
+                return out
+            if self.mode == "muted":
+                # 思考已收起：只等 Action:（本步结束）或 Answer:（开始结论）
+                i_ans = self.buf.find("Answer:", self.pos)
+                i_act = self.buf.find("Action:", self.pos)
+                if i_ans != -1 and (i_act == -1 or i_ans < i_act):
+                    self.pos, self.mode = i_ans + len("Answer:"), "answer"
+                    continue
+                if i_act != -1:
+                    self.mode = "done"
                 return out
             if self.mode == "answer":
                 if not self.answer_started:
@@ -156,6 +180,11 @@ class ReActStreamParser:
                 self._emit_answer(end, out)
                 return out
             return out   # done
+
+    def _emit_thought(self, end, out):
+        if end > self.pos:
+            self.thought_len += end - self.pos
+            self._emit_upto(end, "thought", out)
 
     def _emit_answer(self, end, out):
         if end > self.pos:
