@@ -192,10 +192,13 @@ def chat(question: str, history: list, request: gr.Request = None):
     accumulated = ""
     citations_data = []
     problem = None
+    import time as _t
+    last_push = 0.0
     try:
         for kind, payload in _stream_with_watchdog(question, mode_key, history, prog=prog):
             if kind == "tick":
                 new_history[-1]["content"] = _show(accumulated)
+                last_push = _t.time()
                 yield _masked(new_history), "", ""
                 continue
             if kind == "timeout":
@@ -222,6 +225,11 @@ def chat(question: str, history: list, request: gr.Request = None):
             else:
                 accumulated += delta
                 new_history[-1]["content"] = _show(accumulated)
+                # 限流：逐字输出时每 0.3 秒最多推一次。一次回答原来要推 1000 多次，
+                # 网络差（国内连 Vultr）时推得越多越容易中途断流，界面就停在半截
+                if _t.time() - last_push < 0.3:
+                    continue
+            last_push = _t.time()
             yield _masked(new_history), "", ""
         if problem:
             new_history[-1]["content"] = (accumulated + "\n\n" + problem) if accumulated else problem

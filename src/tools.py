@@ -269,6 +269,29 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
                 acl.reset_current_user(tok)
         return wrapped
 
-    return [FunctionTool.from_defaults(fn=_with_user(f)) for f in (
-        error_code_lookup, keyword_search, semantic_search, fault_history_lookup,
-        inspect_diagram, trace_connection, netlist_trace)]
+    fns = [error_code_lookup, keyword_search, semantic_search, fault_history_lookup,
+           inspect_diagram, trace_connection, netlist_trace]
+    if not _vision_available():
+        fns.remove(inspect_diagram)   # 看图模型连不上时不给智能体，免得每次白白失败一步
+    return [FunctionTool.from_defaults(fn=_with_user(f)) for f in fns]
+
+
+_vision_state = {"t": 0.0, "ok": True}
+
+
+def _vision_available() -> bool:
+    """看图模型是否可用（结果缓存 5 分钟）。默认 ollama_local 指向本机 11434，服务器上没装就是不可用。"""
+    import os, time
+    if os.getenv("VISION_PROVIDER", "ollama_local") != "ollama_local":
+        return True
+    if time.time() - _vision_state["t"] < 300:
+        return _vision_state["ok"]
+    ok = False
+    try:
+        import httpx
+        base = os.getenv("LLM_BASE_URL", "http://localhost:11434").rstrip("/")
+        ok = httpx.get(f"{base}/api/tags", timeout=1.5, trust_env=False).status_code == 200
+    except Exception:
+        ok = False
+    _vision_state.update(t=time.time(), ok=ok)
+    return ok
