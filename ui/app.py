@@ -952,29 +952,33 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
     err_code.submit(do_error_lookup, [err_code], [err_out])
 
     # 页面加载：手机点导航后自动收起抽屉
-    demo.load(js="""() => {
-      // 手机（≤768px）：侧栏平时收成图标栏，展开时是浮层抽屉；打开页面和点导航后都自动收起
-      function closeDrawer() {
-        if (window.innerWidth > 768) return;
-        const s = document.querySelector('#nk-side-wrap');
-        if (!s || !s.classList.contains('open')) return;
-        const t = s.querySelector('.toggle-button') || document.querySelector('.menu-toggle-button');
-        if (t) t.click();
-      }
-      // 打开页面时侧栏渲染较晚（网络慢时更晚），轮询到侧栏出现后收起一次就停，不影响之后手动展开
-      if (window.innerWidth <= 768) {
-        let tries = 0;
-        const iv = setInterval(() => {
-          const s = document.querySelector('#nk-side-wrap');
-          if (s && s.classList.contains('open')) { closeDrawer(); clearInterval(iv); }
-          else if (++tries > 50) clearInterval(iv);
-        }, 300);
-      }
-      document.body.addEventListener('click', (e) => {
-        if (e.target.closest('.nk-navbtn, .nk-newbtn')) setTimeout(closeDrawer, 90);
-        // 注意:收起按钮 .nk-collapse 的折叠由其内联 onclick 处理,这里不再重复(否则触发两次=没动)
-      }, true);
-    }""")
+
+
+# 页面脚本：手机（≤768px）侧栏平时收成图标栏，展开时是浮层抽屉。
+# 用 launch(head=…) 注入——demo.load(js=…) 在 Gradio 6.9 上不执行（以前写的“点导航自动收起”一直没生效）。
+_HEAD_JS = """<script>
+(function () {
+  function isMobile() { return window.innerWidth <= 768; }
+  function closeDrawer() {
+    if (!isMobile()) return;
+    var s = document.querySelector('#nk-side-wrap');
+    if (!s || !s.classList.contains('open')) return;
+    var t = s.querySelector('.toggle-button') || document.querySelector('.menu-toggle-button');
+    if (t) t.click();
+  }
+  // 打开页面时侧栏渲染较晚（网络慢更晚），轮询到侧栏出现后收起一次就停，不影响之后手动展开
+  var tries = 0;
+  var iv = setInterval(function () {
+    var s = document.querySelector('#nk-side-wrap');
+    if (s && s.classList.contains('open')) { closeDrawer(); clearInterval(iv); }
+    else if (++tries > 100) clearInterval(iv);
+  }, 300);
+  // 手机上点了导航项/新建对话，抽屉自动收起
+  document.addEventListener('click', function (e) {
+    if (e.target.closest && e.target.closest('.nk-navbtn, .nk-newbtn')) setTimeout(closeDrawer, 90);
+  }, true);
+})();
+</script>"""
 
 
 # ── 注册 FastAPI 路由（本地模式需要 PDF 服务，远程模式由 API 服务提供） ──
@@ -1076,7 +1080,7 @@ if __name__ == "__main__":
     # gradio 6：theme / css 在 launch() 传（不再放 Blocks 构造器）
     launch_kwargs = {"server_name": host, "server_port": port, "share": False,
                      "prevent_thread_lock": True, "theme": nikon_theme,
-                     "css": _FULL_CSS, "favicon_path": _FAVICON}
+                     "css": _FULL_CSS, "favicon_path": _FAVICON, "head": _HEAD_JS}
     # 登录：security 开启 → 逐人校验 users 表(per-user 身份，驱动 ACL)；
     #       否则回退单一共享账号 GRADIO_AUTH(向后兼容)。
     from src import acl
