@@ -961,7 +961,15 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
         const t = s.querySelector('.toggle-button') || document.querySelector('.menu-toggle-button');
         if (t) t.click();
       }
-      setTimeout(closeDrawer, 300);
+      // 打开页面时侧栏渲染较晚（网络慢时更晚），轮询到侧栏出现后收起一次就停，不影响之后手动展开
+      if (window.innerWidth <= 768) {
+        let tries = 0;
+        const iv = setInterval(() => {
+          const s = document.querySelector('#nk-side-wrap');
+          if (s && s.classList.contains('open')) { closeDrawer(); clearInterval(iv); }
+          else if (++tries > 50) clearInterval(iv);
+        }, 300);
+      }
       document.body.addEventListener('click', (e) => {
         if (e.target.closest('.nk-navbtn, .nk-newbtn')) setTimeout(closeDrawer, 90);
         // 注意:收起按钮 .nk-collapse 的折叠由其内联 onclick 处理,这里不再重复(否则触发两次=没动)
