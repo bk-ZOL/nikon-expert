@@ -203,7 +203,7 @@ def chat(question: str, history: list, request: gr.Request = None):
                 continue
             if kind == "timeout":
                 problem = ("⏱️ 响应超时——后端可能临时卡住或网络中断，已中断本次。稍等重发一般就好；"
-                           "若频繁如此多为大脑/工具临时无响应。" if payload == "idle"
+                           "若频繁如此多为模型/工具临时无响应。" if payload == "idle"
                            else "⏱️ 本次处理时间过长，已自动结束。把问题拆细一点再问会更稳。")
                 break
             if kind == "perm":
@@ -312,11 +312,11 @@ def do_switch_provider(provider_label: str, request: gr.Request = None):
     from src.providers import get_provider
     prov = get_provider(pid)
     if prov.get("needs_key") and not _provider_key(pid):
-        tip = f"⚠️ 该大脑需在 .env 设置 `{prov['key_env']}`"
+        tip = f"⚠️ 该模型需在 .env 设置 `{prov['key_env']}`"
     elif prov.get("use_proxy"):
-        tip = "🌐 海外大脑，将走本地代理；数据会外传该 API"
+        tip = "🌐 海外模型，将走本地代理；数据会外传该 API"
     elif prov["kind"] != "ollama":
-        tip = "☁️ 云端大脑：数据会外传该 API（embedding/检索仍本地）"
+        tip = "☁️ 云端模型：数据会外传该 API（embedding/检索仍本地）"
     return gr.update(choices=models, value=models[0] if models else None), tip
 
 
@@ -326,7 +326,7 @@ def do_apply_model(provider_label: str, model_name: str, request: gr.Request = N
         return _ADMIN_ONLY
     pid = _LABEL2ID.get(provider_label)
     if not pid:
-        return "⚠️ 请选择大脑"
+        return "⚠️ 请选择模型服务"
     if not model_name:
         return "⚠️ 请选择或填写模型名"
     try:
@@ -1135,14 +1135,14 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
             send_btn = gr.Button("↑", variant="primary", scale=1, elem_id="nk-send")
         citation_buttons = gr.HTML("", elem_id="citation_buttons")
         gr.HTML(_TOOLS)
-        with gr.Accordion("⚙️ 设置 · 切换大脑", open=False):
+        with gr.Accordion("⚙️ 设置 · 切换模型", open=False):
             with gr.Row():
                 provider_dropdown = gr.Dropdown(choices=_PROVIDER_CHOICES,
-                    value=_PROVIDER_CHOICES[0], label="🧠 大脑（provider）", interactive=True)
+                    value=_PROVIDER_CHOICES[0], label="模型服务（provider）", interactive=True)
                 model_dropdown = gr.Dropdown(choices=backend.get_ollama_models(),
                     value=backend.get_current_model(), label="🤖 模型",
                     allow_custom_value=True, interactive=True)
-            switch_btn = gr.Button("切换大脑", size="sm")
+            switch_btn = gr.Button("切换模型", size="sm")
             switch_status = gr.Markdown("")
 
     # ── 视图：知识库（真组件，接后端）──

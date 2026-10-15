@@ -693,7 +693,7 @@ def _agent_query_stream(question: str, history: list = None):
     from src.progress import report
 
     yield "🔍 **多步排查中……**\n\n", False, [], [], True
-    report("多步排查：大脑在规划先查什么")
+    report("多步排查：规划排查步骤中")
 
     parser = ReActStreamParser()
     final = None
@@ -752,7 +752,7 @@ def _agent_query_stream(question: str, history: list = None):
             args = "，".join(f"{k}={v}" for k, v in ev["args"].items())
             yield show(parser.flush()) + close_thought() + f"🔧 `{ev['tool']}`（{args}）\n", False, [], [], True
         elif kind == "observation":
-            report(f"多步排查：第 {step} 步查完，大脑在分析结果、决定下一步")
+            report(f"多步排查：第 {step} 步查完，分析结果中")
             out = (ev["output"] or "").strip().replace("\n", " ")[:100]
             yield f"　↳ {out}…\n", False, [], [], True
         elif kind == "answer":
@@ -820,7 +820,7 @@ def query_stream(question: str, mode: str = "qa", history: list = None, user=Non
         final_prompt = prompt_tmpl.format(context=context, query=history_prefix + question)
 
         from src.progress import report
-        report(f"整理答案：参考 {len(citations)} 份资料，大脑思考中")
+        report(f"整理答案：参考 {len(citations)} 份资料，生成回答中")
         first = True
         for token in Settings.llm.stream_complete(final_prompt):
             if first:
