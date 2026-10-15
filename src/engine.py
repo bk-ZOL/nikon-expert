@@ -788,6 +788,8 @@ def query_stream(question: str, mode: str = "qa", history: list = None, user=Non
     from llama_index.core import Settings
     from src import acl
 
+    from src.error_code import annotate
+    question = annotate(question)         # 贴了报警界面原文（STG - FATAL - E Detail: …）→ 注明 STG-10-17
     if user is None:                      # 上层（如 Gradio chat）可能已绑 contextvar
         user = acl.get_current_user()
     _tok = acl.set_current_user(user)

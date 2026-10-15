@@ -182,6 +182,8 @@ def build_tools(collector: SourceCollector, retriever=None, question: str = "", 
         现场写法 STG-29-80（控制器-主码-细分码）会自动换算成手册里的主码 29H / 细分码 80H 并给出原文。
         当故障描述中出现明确的报警码 / error code 时，优先用本工具。
         参数 code: 报警码字符串。"""
+        from src.error_code import from_screen
+        code = (from_screen(code) or [code])[0]   # 报警界面原文 → STG-10-17
         def run():
             from src import acl
             from src.error_code import lookup as _conv
@@ -246,7 +248,8 @@ def build_tools(collector: SourceCollector, retriever=None, question: str = "", 
         参数 query: 故障代码或现象关键词（如「STG-B8-E0」「CT 轴无法升起」「FFU 停止」）。"""
         def run():
             from src import acl, ts_table
-            return ts_table.lookup_for_agent(query, acl.get_current_user(), want_models=want or None)
+            from src.error_code import annotate
+            return ts_table.lookup_for_agent(annotate(query), acl.get_current_user(), want_models=want or None)
         return _memo("troubleshooting_lookup", query, run)
 
     def fault_history_lookup(query: str) -> str:

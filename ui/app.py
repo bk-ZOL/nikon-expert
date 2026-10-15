@@ -905,6 +905,8 @@ def _tick_jobs(request: gr.Request = None):
 
 
 def do_error_lookup(code, request: gr.Request = None):
+    from src.error_code import from_screen
+    code = (from_screen(code or "") or [code])[0]   # 报警界面原文 → STG-10-17
     code = (code or "").strip()
     if not code:
         return "输入一个错误码，如 `E-5301`。"

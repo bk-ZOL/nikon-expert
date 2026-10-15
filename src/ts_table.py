@@ -175,6 +175,7 @@ EXTRACT_PROMPT = """你是 Nikon 光刻机（NSR 系列）的资深维修专家�
    「检查 / 确认 / 观察」这类排查步骤，除非它本身就解决了问题，否则不算解决措施。还没解决就留空。
 5. Root cause：查明的原因（不是现象：「报警 STG-B8-E0」是现象，「RB 供气压力偏低」才是根因）；只是推测就在前面加「推定：」；没查出来写「待查」。
 6. 故障代码照原文抄，多个用「；」隔开；没有写空字符串。
+   报警界面原文「STG - FATAL - E Detail: 60730410 FFF0FE17 …」要换算：第 1、2 串各取最后两位 → 写 STG-10-17。
 7. 状态：Close = 根因确认并解决；Pending = 临时措施已上 / 在等备件或条件；Open = 还没头绪。
 
 Unit 只能从这里选一个：{units}
@@ -542,6 +543,10 @@ def search(user=None, admin=False, machine="", unit="", status="", keyword="", w
     elif status:
         sql += " AND status=?"; params.append(status)
     rows = c.execute(sql + " ORDER BY (COALESCE(origin,'field')='oem'), occ_count DESC, last_date DESC, id", params).fetchall()
+    from src.error_code import from_screen
+    scr = from_screen(keyword or "")
+    if scr:                       # 搜索框里贴了报警界面原文 → 按换算出的 STG-10-17 搜
+        keyword = scr[0]
     kw = [k.lower() for k in re.split(r"\s+", (keyword or "").strip()) if k]
     out = []
     for e in rows:
@@ -597,7 +602,8 @@ def save_entry(admin: str, eid: int, **fields) -> str:
 
 def lookup_for_agent(query: str, user, want_models=None, k: int = 4) -> str:
     """智能体用：按故障代码 / 关键词找已确认条目，输出现场验证过的根因、解决措施、弯路。"""
-    q = (query or "").strip()
+    from src.error_code import annotate
+    q = annotate((query or "").strip())
     codes = re.findall(r"[A-Z]{2,5}-[0-9A-F]{1,2}(?:-[0-9A-F]{1,2})?|#?[0-9A-F]{2}H?-[0-9A-F]{2}|[0-9A-F]{8}|[0-9A-F]{4}", q.upper())
     mkeys = {match_key(cd) for cd in codes} - {""}
     hits = []

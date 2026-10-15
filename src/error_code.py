@@ -1,6 +1,7 @@
 """现场错误码写法 → 手册 / 原文换算。
 
-现场（工作日志、故障履历）写 STG-29-80：控制器 STG、主码 29H、细分码 80H（都是十六进制）。对应：
+现场（工作日志、故障履历）写 STG-29-80：控制器 STG、主码 29H、细分码 80H（都是十六进制）。
+机台报警界面写「STG - FATAL - E Detail: 60730410 FFF0FE17 00000000 00000000」：第 1、2 串各取最后两位 = STG-10-17。对应：
   - STG 错误信息原文 e_st_0540（WPS「5.Error code」目录）：#29H 节下的「80H: …」行；
   - 《Error Code List》STG-xxxx-x (0B20xxxx) 章 (2) Unit Error Code List：主码「|29|」行、细分码「FFFF**80」行。
 目前只做 STG：其他控制器的原文是 8 位码（#4000F007H），现场不会写成 XX-YY。
@@ -17,10 +18,38 @@ FIELD_RE = re.compile(r"(?<![A-Z0-9])(STG)[\s\-_]?([0-9A-F]{2})H?(?:[\s\-_/]([0-
 TEXT_PREFIX = {"STG": "e_st_"}
 
 
-def parse(text: str) -> list:
-    """从文字里找现场写法的错误码，返回 [(控制器, 主码, 细分码或空), …]（大写、去重、保持顺序）。"""
+# 机台报警界面的写法（2026-10-15 用户说明）：
+#   STG - FATAL - E Detail:
+#   60730410 FFF0FE17 00000000 00000000
+# 第一段是 Unit（STG）；第 1、2 串 8 位码各取最后两位 → 主码 10、细分码 17 → STG-10-17。
+# 目前只确认了 STG 的规则；其他 Unit 的报警界面写法还没找到统一标准，不换算（免得猜错带偏检索）。
+SCREEN_RE = re.compile(
+    r"(?<![A-Z0-9])(STG)\s*-\s*(?:FATAL|WARNING|WARN|ERROR|ALARM|INFO)?[^0-9A-Z]{0,6}[A-Z]?\s*"
+    r"(?:DETAIL\s*:?)?\s*([0-9A-F]{8})\s+([0-9A-F]{8})", re.I | re.S)
+
+
+def from_screen(text: str) -> list:
+    """报警界面原文 → ["STG-10-17", …]。"""
     out = []
-    for c, m, d in FIELD_RE.findall((text or "").upper()):
+    for unit, s1, s2 in SCREEN_RE.findall(text or ""):
+        code = f"{unit.upper()}-{s1[-2:].upper()}-{s2[-2:].upper()}"
+        if code not in out:
+            out.append(code)
+    return out
+
+
+def annotate(text: str) -> str:
+    """问题里贴了报警界面原文时，在后面注明换算出的错误码，方便检索和模型理解。"""
+    codes = from_screen(text)
+    return f"{text}（报警界面换算：{'、'.join(codes)}）" if codes else text
+
+
+def parse(text: str) -> list:
+    """从文字里找现场写法的错误码，返回 [(控制器, 主码, 细分码或空), …]（大写、去重、保持顺序）。
+    报警界面原文（STG - FATAL - E Detail: 60730410 FFF0FE17 …）先换算成 STG-10-17 再找。"""
+    out = []
+    text = " ".join(from_screen(text)) + " " + (text or "")
+    for c, m, d in FIELD_RE.findall(text.upper()):
         k = (c, m, d or "")
         if k not in out:
             out.append(k)
