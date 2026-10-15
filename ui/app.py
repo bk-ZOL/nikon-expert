@@ -1351,8 +1351,10 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
     new_btn.click(lambda: _switch_view("chat") + [[], "", ""],
                   None, _nav_out + [chatbot, question, citation_buttons])
 
-    send_btn.click(chat, [question, chatbot], [chatbot, question, citation_buttons])
-    question.submit(chat, [question, chatbot], [chatbot, question, citation_buttons])
+    send_btn.click(chat, [question, chatbot], [chatbot, question, citation_buttons],
+                    show_progress="hidden")   # Gradio 默认加载遮罩会把对话框整个盖住，流式内容和状态行都看不见
+    question.submit(chat, [question, chatbot], [chatbot, question, citation_buttons],
+                    show_progress="hidden")   # Gradio 默认加载遮罩会把对话框整个盖住，流式内容和状态行都看不见
     provider_dropdown.change(do_switch_provider, [provider_dropdown], [model_dropdown, switch_status])
     switch_btn.click(do_apply_model, [provider_dropdown, model_dropdown], [switch_status])
 
