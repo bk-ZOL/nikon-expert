@@ -196,7 +196,14 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
             if retriever is None:
                 return keyword_search(query)
             try:
-                nodes = retriever.retrieve(query)
+                # 走 engine._retrieve_semantic：security 开时按当前用户注入权限过滤。
+                # 以前直接用全局 retriever，绕过了权限（待审核的客户资料也会被查出来）。
+                from src import acl
+                from src.engine import _init_engine, _retrieve_semantic
+                eng = _init_engine()
+                nodes = _retrieve_semantic(eng, query, acl.get_current_user(), eng.get("top_k", 8))
+            except acl.PermissionDenied:
+                return "（没有检索权限）"
             except Exception as e:
                 return f"语义检索失败：{e}"
             results = []

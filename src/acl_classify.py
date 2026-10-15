@@ -80,6 +80,56 @@ def classify(doc_name: str, doc_type: str) -> dict:
     return _row(4, "internal", "pending", None)  # 判不出 = 不可见 + 待办
 
 
+# ── v2 细分维度：类别 / 机型 / 客户（2026-10-15）──────────────────────
+def category_of(doc_type: str, source_class: str) -> str:
+    """资料类别（acl.CATEGORIES 的 key）。"""
+    if doc_type == "circuit_diagram":
+        return "circuit"
+    if source_class == "oem_manual":
+        return "oem_manual"
+    if source_class in ("customer_deliverable", "commercial"):
+        return source_class
+    if source_class == "fault_history":
+        return "worklog" if doc_type in ("worklog", "feishu_worklog") else "fault_history"
+    if source_class == "internal_sop":
+        return "sop"
+    return "other"
+
+
+def customer_of(owner_scope: str) -> str:
+    return owner_scope.split(":", 1)[1] if (owner_scope or "").startswith("customer:") else "none"
+
+
+def models_of(tags) -> list:
+    """机型标签（可多个、可能是旧写法）→ 机型族列表；没标签或通用资料 → ["ALL"]。"""
+    from src.machine_model import normalize
+    fams = []
+    for t in tags or []:
+        fams.extend(normalize(t))
+    fams = [f for f in dict.fromkeys(fams) if f]
+    if not fams or "COMMON" in fams:
+        return ["ALL"]
+    return fams
+
+
+def models_str(models: list) -> str:
+    """存进 doc_acl.models 的写法：前后带逗号，便于 LIKE '%,S207D,%'。"""
+    return "," + ",".join(models) + ","
+
+
+def doc_models(conn, doc_name: str) -> list:
+    """从全文索引取这份资料的机型标签。"""
+    rows = conn.execute("SELECT DISTINCT machine_model FROM doc_fts WHERE doc_name = ?", (doc_name,)).fetchall()
+    tags = [r[0] for r in rows if r[0]]
+    if not tags:
+        try:
+            tags = [r[0] for r in conn.execute(
+                "SELECT DISTINCT machine_model FROM doc_meta WHERE doc_name = ?", (doc_name,)).fetchall() if r[0]]
+        except Exception:
+            pass
+    return models_of(tags)
+
+
 # ── 摄入侧增量定级 ───────────────────────────────────────────────────
 def apply_doc_acl(doc_name: str) -> bool:
     """摄入某文档后自动定级：写 doc_acl(SQLite) + 回填 Qdrant payload。
@@ -98,6 +148,9 @@ def apply_doc_acl(doc_name: str) -> bool:
             return False
         doc_type = rows[0][1] or ""
         c = classify(doc_name, doc_type)
+        c["category"] = category_of(doc_type, c["source_class"])
+        c["customer"] = customer_of(c["owner_scope"])
+        c["models"] = doc_models(conn, doc_name)
 
         for (doc_id, _dt) in rows:
             # 保护人工定级：已被人改过(classified_by != 'auto')的不覆盖
@@ -109,25 +162,38 @@ def apply_doc_acl(doc_name: str) -> bool:
             conn.execute(
                 """INSERT INTO doc_acl
                    (doc_id, filename, sec_level, owner_scope, review_status,
-                    source_class, classified_by, classified_at)
-                   VALUES (?,?,?,?,?,?, 'auto', datetime('now'))
+                    source_class, category, models, customer, classified_by, classified_at)
+                   VALUES (?,?,?,?,?,?,?,?,?, 'auto', datetime('now'))
                    ON CONFLICT(doc_id) DO UPDATE SET
                      filename=excluded.filename, sec_level=excluded.sec_level,
                      owner_scope=excluded.owner_scope, review_status=excluded.review_status,
-                     source_class=excluded.source_class, classified_by='auto',
+                     source_class=excluded.source_class, category=excluded.category,
+                     models=excluded.models, customer=excluded.customer, classified_by='auto',
                      classified_at=datetime('now')""",
                 (doc_id, doc_name, c["sec_level"], c["owner_scope"],
-                 c["review_status"], c["source_class"]),
+                 c["review_status"], c["source_class"], c["category"],
+                 models_str(c["models"]), c["customer"]),
             )
         conn.commit()
+        # 回填 Qdrant payload：以 doc_acl 里的实际值为准（人工改过的不会被自动定级覆盖）
+        actual = acl_row_for(conn, doc_name) or c
         conn.close()
-
-        # 回填 Qdrant payload（该文档的所有 chunk）
-        _set_qdrant_payload(doc_name, c)
+        _set_qdrant_payload(doc_name, actual)
         return True
     except Exception as e:
         print(f"⚠️  自动定级失败（{doc_name}）：{e}（该文档暂不可见，可事后 classify_docs 补）")
         return False
+
+
+def acl_row_for(conn, doc_name: str):
+    """doc_acl 里这份资料的权限（同名多 doc_id 取第一条）。"""
+    r = conn.execute(
+        "SELECT sec_level, owner_scope, review_status, category, models, customer "
+        "FROM doc_acl WHERE filename = ? ORDER BY doc_id LIMIT 1", (doc_name,)).fetchone()
+    if not r:
+        return None
+    return {"sec_level": r[0], "owner_scope": r[1], "review_status": r[2], "category": r[3] or "other",
+            "models": [m for m in (r[4] or ",ALL,").split(",") if m], "customer": r[5] or "none"}
 
 
 def _set_qdrant_payload(doc_name: str, c: dict):
@@ -140,7 +206,8 @@ def _set_qdrant_payload(doc_name: str, c: dict):
     client.set_payload(
         collection_name=collection,
         payload={"sec_level": c["sec_level"], "owner_scope": c["owner_scope"],
-                 "review_status": c["review_status"], "acl_users": []},
+                 "review_status": c["review_status"], "acl_users": [],
+                 "category": c["category"], "models": c["models"], "customer": c["customer"]},
         points=qm.Filter(must=[qm.FieldCondition(
             key="doc_name", match=qm.MatchValue(value=doc_name))]),
     )

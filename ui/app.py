@@ -458,6 +458,118 @@ def _reveal_admin(request: gr.Request = None):
     return gr.update(visible=_is_admin_user(request))
 
 
+# ── 权限管理（审计页的各个标签，仅管理员）──────────────────────────────
+_NEW_USER = "＋ 新建账号"
+
+
+def _admin_uid(request):
+    try:
+        u = _resolve_login_user(request)
+        return u.uid if u else ""
+    except Exception:
+        return ""
+
+
+def _choices_cat():
+    from src import acl
+    return [(v, k) for k, v in acl.CATEGORIES.items()]
+
+
+def _choices_model():
+    from src import acl
+    return [("全部机型（不限）", acl.ALL_MODELS)] + [(m, m) for m in acl.MODELS]
+
+
+def _choices_cust():
+    from src import acl
+    return [(name, key) for key, name in acl.customers().items()]
+
+
+def _choices_role():
+    from src.acl_admin import ROLE_LABELS
+    return [(v, k) for k, v in ROLE_LABELS.items()]
+
+
+def adm_users(request: gr.Request = None):
+    from src import acl_admin
+    if not _is_admin_user(request):
+        return pd.DataFrame(), gr.update()
+    rows = acl_admin.list_users()
+    return pd.DataFrame(rows), gr.update(choices=[_NEW_USER] + [r["账号"] for r in rows])
+
+
+def adm_pick_user(uid, request: gr.Request = None):
+    """选中账号 → 填表单（uid, 名称, 角色, 密级, 类别, 机型, 客户, 有效期, 状态, 密码清空）。"""
+    from src import acl_admin
+    if not _is_admin_user(request):
+        return [gr.update()] * 10
+    if not uid or uid == _NEW_USER:
+        import datetime as _dt
+        return [gr.update(value="", interactive=True), "", "engineer", 3,
+                ["sop", "fault_history", "worklog", "oem_manual"], ["ALL"], [],
+                (_dt.date.today() + _dt.timedelta(days=365 * 3)).isoformat(), "active", ""]
+    u = acl_admin.get_user(uid)
+    if not u:
+        return [gr.update()] * 10
+    return [gr.update(value=u["uid"], interactive=False), u["display_name"], u["role"], u["clearance"],
+            u["cats"], u["models"], u["custs"], u["valid_until"], u["status"], ""]
+
+
+def adm_save_user(pick, uid, name, role, clearance, cats, models, custs, until, status, pw,
+                  request: gr.Request = None):
+    from src import acl_admin
+    if not _is_admin_user(request):
+        return "⛔ 仅管理员可操作。", pd.DataFrame(), gr.update()
+    msg = acl_admin.save_user(_admin_uid(request), uid, name, role, clearance, cats, models, custs,
+                              until, status, pw, create=(not pick or pick == _NEW_USER))
+    df, dd = adm_users(request)
+    if msg.startswith("✅") and (not pick or pick == _NEW_USER):
+        dd = gr.update(choices=dd["choices"] if isinstance(dd, dict) else None, value=uid.strip())
+    return msg, df, dd
+
+
+_KEEP = "（不改）"
+
+
+def adm_docs(cat, model, cust, review, kw, request: gr.Request = None):
+    from src import acl_admin
+    if not _is_admin_user(request):
+        return "⛔ 仅管理员可见。", pd.DataFrame(), gr.update(choices=[], value=[])
+    rows = acl_admin.list_docs(cat or "", model or "", cust or "", review or "", (kw or "").strip())
+    names = [r["filename"] for r in rows]
+    return (f"筛出 **{len(rows)}** 份资料。在下面「要修改的资料」里勾选，或勾「应用到全部筛选结果」。",
+            pd.DataFrame(acl_admin.docs_table(rows)), gr.update(choices=names, value=[]))
+
+
+def adm_apply_docs(cat, model, cust, review, kw, picked, all_hits, n_cat, keep_models, n_models,
+                   n_cust, n_level, n_review, request: gr.Request = None):
+    from src import acl_admin
+    if not _is_admin_user(request):
+        return "⛔ 仅管理员可操作。", pd.DataFrame(), gr.update()
+    if all_hits:
+        picked = [r["filename"] for r in acl_admin.list_docs(cat or "", model or "", cust or "",
+                                                             review or "", (kw or "").strip())]
+    msg = acl_admin.update_docs(
+        _admin_uid(request), picked,
+        category=None if n_cat in ("", _KEEP, None) else n_cat,
+        models=None if keep_models else (n_models or []),
+        customer=None if n_cust in ("", _KEEP, None) else n_cust,
+        sec_level=None if n_level in ("", _KEEP, None) else int(str(n_level).lstrip("L")),
+        review=None if n_review in ("", _KEEP, None) else n_review)
+    _, df, dd = adm_docs(cat, model, cust, review, kw, request)
+    return msg, df, dd
+
+
+def adm_preview(uid, request: gr.Request = None):
+    from src import acl_admin
+    if not _is_admin_user(request):
+        return "⛔ 仅管理员可见。", pd.DataFrame(), pd.DataFrame()
+    if not uid or uid == _NEW_USER:
+        return "先选一个账号。", pd.DataFrame(), pd.DataFrame()
+    summary, vis, hid = acl_admin.preview(uid)
+    return summary, pd.DataFrame(vis), pd.DataFrame(hid)
+
+
 def do_admin_report(request: gr.Request = None):
     """管理员审计：用户权限总览 + 登录/使用记录（含 IP 归属地）。"""
     import datetime as _dt
@@ -915,16 +1027,65 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
 
     # ── 视图：审计（仅管理员，导航按钮默认隐藏，登录后由 _reveal_admin 放出）──
     with gr.Column(visible=False) as view_admin:
-        gr.HTML('<div class="nk-view" style="margin-bottom:0;"><h2>🛡 审计</h2>'
-                '<div class="nk-view-sub">登录/使用记录 · 来源 IP 与归属地 · 用户权限（仅管理员可见）</div></div>')
-        admin_refresh_btn = gr.Button("刷新", variant="primary")
-        admin_status = gr.Markdown("")
-        gr.HTML('<div class="nk-sec first">用户权限</div>')
-        admin_perms = gr.Dataframe(headers=["用户", "角色", "密级", "归属域", "状态"],
-                                   interactive=False, wrap=True)
-        gr.HTML('<div class="nk-sec">登录 / 使用记录（最近 200 条）</div>')
-        admin_log = gr.Dataframe(headers=["时间", "用户", "操作", "IP", "归属地", "结果", "设备"],
-                                 interactive=False, wrap=True)
+        gr.HTML('<div class="nk-view" style="margin-bottom:0;"><h2>🛡 权限管理</h2>'
+                '<div class="nk-view-sub">账号 · 资料可见范围（类别 × 机型 × 客户 × 密级）· 权限预览 · 使用记录（仅管理员可见）</div></div>')
+        with gr.Tabs():
+            with gr.Tab("账号管理"):
+                adm_users_df = gr.Dataframe(interactive=False, wrap=True)
+                with gr.Row():
+                    adm_pick = gr.Dropdown(label="选择账号（或新建）", choices=[_NEW_USER], value=None, scale=2)
+                    adm_uid = gr.Textbox(label="账号名（登录用）", scale=2)
+                    adm_name = gr.Textbox(label="显示名称", scale=2)
+                with gr.Row():
+                    adm_role = gr.Dropdown(label="角色", choices=_choices_role(), value="engineer", scale=2)
+                    adm_level = gr.Radio(label="密级上限", choices=[1, 2, 3, 4], value=3, scale=2)
+                    adm_until = gr.Textbox(label="有效期至（YYYY-MM-DD）", scale=1)
+                    adm_ustatus = gr.Dropdown(label="状态", choices=[("启用", "active"), ("停用", "suspended"),
+                                                                   ("离职", "left")], value="active", scale=1)
+                adm_cats = gr.CheckboxGroup(label="可看的资料类别", choices=_choices_cat())
+                adm_models = gr.CheckboxGroup(label="可看的机型（勾「全部机型」= 不限）", choices=_choices_model())
+                adm_custs = gr.CheckboxGroup(label="可看的客户资料（不勾 = 看不到任何客户的资料）", choices=_choices_cust())
+                adm_pw = gr.Textbox(label="新密码（新建必填；修改时留空 = 不改）", type="password")
+                adm_user_save = gr.Button("保存账号", variant="primary")
+                adm_user_msg = gr.Markdown("")
+            with gr.Tab("资料权限"):
+                with gr.Row():
+                    adm_f_cat = gr.Dropdown(label="类别", choices=[("全部", "")] + _choices_cat(), value="")
+                    adm_f_model = gr.Dropdown(label="机型", choices=[("全部", "")] + [(m, m) for m in ["S207D", "S206D", "S308F", "SF100"]], value="")
+                    adm_f_cust = gr.Dropdown(label="客户", choices=[("全部", ""), ("非客户资料", "none")] + _choices_cust(), value="")
+                    adm_f_review = gr.Dropdown(label="审核状态", choices=[("全部", ""), ("已审核", "approved"),
+                                                                    ("待审核", "pending"), ("已驳回", "rejected")], value="")
+                    adm_f_kw = gr.Textbox(label="文件名关键词")
+                adm_docs_btn = gr.Button("筛选", variant="primary")
+                adm_docs_msg = gr.Markdown("")
+                adm_docs_df = gr.Dataframe(interactive=False, wrap=True, max_height=420)
+                gr.HTML('<div class="nk-sec">批量修改</div>')
+                adm_picked = gr.Dropdown(label="要修改的资料（可多选）", choices=[], multiselect=True)
+                adm_all = gr.Checkbox(label="应用到全部筛选结果（忽略上面的勾选）", value=False)
+                with gr.Row():
+                    adm_n_cat = gr.Dropdown(label="改类别为", choices=[_KEEP] + _choices_cat(), value=_KEEP)
+                    adm_n_cust = gr.Dropdown(label="改客户为", choices=[_KEEP, ("非客户资料", "none")] + _choices_cust(), value=_KEEP)
+                    adm_n_level = gr.Dropdown(label="改密级为", choices=[_KEEP, "L1", "L2", "L3", "L4"], value=_KEEP)
+                    adm_n_review = gr.Dropdown(label="改审核状态为", choices=[_KEEP, ("已审核（放行）", "approved"),
+                                                                       ("待审核（隐藏）", "pending"), ("已驳回（隐藏）", "rejected")], value=_KEEP)
+                adm_keep_models = gr.Checkbox(label="机型不改", value=True)
+                adm_n_models = gr.CheckboxGroup(label="改机型为（取消上面「机型不改」才生效）", choices=_choices_model())
+                adm_docs_apply = gr.Button("应用修改", variant="primary")
+            with gr.Tab("权限预览"):
+                with gr.Row():
+                    adm_pv_user = gr.Dropdown(label="选择账号", choices=[], scale=3)
+                    adm_pv_btn = gr.Button("查看", variant="primary", scale=1)
+                adm_pv_msg = gr.Markdown("")
+                gr.HTML('<div class="nk-sec">能看到的资料</div>')
+                adm_pv_vis = gr.Dataframe(interactive=False, wrap=True, max_height=360)
+                gr.HTML('<div class="nk-sec">看不到的资料（附原因）</div>')
+                adm_pv_hid = gr.Dataframe(interactive=False, wrap=True, max_height=360)
+            with gr.Tab("使用记录"):
+                admin_refresh_btn = gr.Button("刷新", variant="primary")
+                admin_status = gr.Markdown("")
+                admin_perms = gr.Dataframe(visible=False)
+                admin_log = gr.Dataframe(headers=["时间", "用户", "操作", "IP", "归属地", "结果", "设备"],
+                                         interactive=False, wrap=True)
 
     # ── 事件绑定 ──
     _views = [view_chat, view_kb, view_log, view_err, view_admin]
@@ -935,8 +1096,24 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
     nav_log.click(lambda: _switch_view("worklog"), None, _nav_out)
     nav_err.click(lambda: _switch_view("err"), None, _nav_out)
     nav_admin.click(lambda: _switch_view("admin"), None, _nav_out).then(
-        do_admin_report, None, [admin_status, admin_perms, admin_log])
+        do_admin_report, None, [admin_status, admin_perms, admin_log]).then(
+        adm_users, None, [adm_users_df, adm_pick])
     admin_refresh_btn.click(do_admin_report, None, [admin_status, admin_perms, admin_log])
+    # 权限管理
+    adm_pick.change(adm_pick_user, [adm_pick], [adm_uid, adm_name, adm_role, adm_level, adm_cats,
+                                                adm_models, adm_custs, adm_until, adm_ustatus, adm_pw])
+    adm_user_save.click(adm_save_user, [adm_pick, adm_uid, adm_name, adm_role, adm_level, adm_cats,
+                                        adm_models, adm_custs, adm_until, adm_ustatus, adm_pw],
+                        [adm_user_msg, adm_users_df, adm_pick])
+    adm_users_df.change(lambda df: gr.update(choices=[u for u in (df["账号"].tolist() if df is not None and "账号" in df else [])]),
+                        [adm_users_df], [adm_pv_user])
+    _doc_filters = [adm_f_cat, adm_f_model, adm_f_cust, adm_f_review, adm_f_kw]
+    adm_docs_btn.click(adm_docs, _doc_filters, [adm_docs_msg, adm_docs_df, adm_picked])
+    adm_f_kw.submit(adm_docs, _doc_filters, [adm_docs_msg, adm_docs_df, adm_picked])
+    adm_docs_apply.click(adm_apply_docs, _doc_filters + [adm_picked, adm_all, adm_n_cat, adm_keep_models,
+                                                         adm_n_models, adm_n_cust, adm_n_level, adm_n_review],
+                         [adm_docs_msg, adm_docs_df, adm_picked])
+    adm_pv_btn.click(adm_preview, [adm_pv_user], [adm_pv_msg, adm_pv_vis, adm_pv_hid])
     # 审计按钮默认隐藏，页面加载时只给管理员/审计员放出（2026-10-14 用户要求恢复）
     demo.load(_reveal_admin, None, [nav_admin])
     new_btn.click(lambda: _switch_view("chat") + [[], "", ""],
