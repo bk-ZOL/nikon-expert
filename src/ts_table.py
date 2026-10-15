@@ -219,22 +219,23 @@ def entry_key(machine, unit, code, symptom_key) -> str:
 def remerge(log=print) -> int:
     """按新的 entry_key 重新归并现场条目（同码不同写法被拆开的合起来），合并后重新整理。返回合并掉的条目数。"""
     c = _conn()
-    rows = c.execute("SELECT * FROM ts_entries WHERE COALESCE(origin,'field')='field'").fetchall()
-    keep, merged, touched = {}, 0, set()
+    rows = c.execute("SELECT * FROM ts_entries WHERE COALESCE(origin,'field')='field' ORDER BY id").fetchall()
+    groups = {}
     for e in rows:
         cs = c.execute("SELECT symptom_key, description FROM ts_cases WHERE entry_id=? LIMIT 1", (e["id"],)).fetchone()
         sym = (cs["symptom_key"] or cs["description"]) if cs else e["title"]
-        k = entry_key(e["machine"], e["unit"], e["error_code"], sym)
-        if k in keep and keep[k] != e["id"]:
-            tgt = keep[k]
+        groups.setdefault(entry_key(e["machine"], e["unit"], e["error_code"], sym), []).append(e)
+    merged, touched = 0, set()
+    for k, es in groups.items():               # 第一遍：同组的合并到最早的那个条目（人工改过的优先保留）
+        es.sort(key=lambda e: (-(e["edited"] or 0), e["id"]))
+        tgt = es[0]["id"]
+        for e in es[1:]:
             c.execute("UPDATE ts_cases SET entry_id=? WHERE entry_id=?", (tgt, e["id"]))
             c.execute("DELETE FROM ts_entries WHERE id=?", (e["id"],))
             touched.add(tgt)
             merged += 1
-        else:
-            keep[k] = e["id"]
-            if e["entry_key"] != k:
-                c.execute("UPDATE ts_entries SET entry_key=? WHERE id=?", (k, e["id"]))
+    for k, es in groups.items():               # 第二遍：改成新键（重复的已删，不会撞唯一约束）
+        c.execute("UPDATE ts_entries SET entry_key=? WHERE id=?", (k, es[0]["id"]))
     c.commit()
     refresh_entries(c, touched, log)
     backfill_match_keys(c)
@@ -613,19 +614,20 @@ def lookup_for_agent(query: str, user, want_models=None, k: int = 4) -> str:
     for ctrl, main, det in parse(q):
         txt = code_lookup(f"{ctrl}-{main}-{det}" if det else f"{ctrl}-{main}") or ""
         m = re.search(rf"#{main}H[^）)]*[）)]：\s*(.+?)(?:\(|（|\n|$)", txt)   # 必须是这个主码自己的名称
-        if m and len(_norm_text(m.group(1))) >= 8:
-            names.append(_norm_text(m.group(1))[:10])     # 去空格标点比前 10 个字：容忍「No return FP (WT) response」这种插字
+        words = [w for w in re.findall(r"[a-z0-9]+", (m.group(1) if m else "").lower()) if len(w) >= 3]
+        if len(words) >= 2:
+            names.append(words)       # 报警名称里 3 个字母以上的词要全部出现（容忍「No return FP (WT) response」这种插字）
     hits = []
     for e in search(user, admin=False, status="confirmed", want_models=want_models):
         score, why = 0, ""
         ec = _code_key(e["error_code"])
         hay = " ".join(str(e[f] or "") for f in ("title", "root_causes", "solutions", "error_code", "unit")).lower()
-        hay1 = _norm_text(hay)
+        hay_words = set(re.findall(r"[a-z0-9]+", hay))
         if e["match_key"] and e["match_key"] in mkeys:
             score, why = 12, ""
         elif ec and any(cd in ec or ec in cd for cd in codes if len(cd) >= 4):
             score, why = 10, ""
-        elif names and any(n in hay1 for n in names):
+        elif names and any(all(w in hay_words for w in ws) for ws in names):
             score, why = 8, "（同报警名称，现场当时没记数字代码）"
         elif mains and e["match_key"][:2] in mains and re.match(r"^[0-9A-F]{2}-", e["match_key"] or ""):
             score, why = 3, f"（同主码 {e['match_key'][:2]}，仅供参考）"
