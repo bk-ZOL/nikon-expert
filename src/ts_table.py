@@ -211,8 +211,35 @@ def extract_cases(machine: str, text: str) -> list:
 
 # ── 3. 写入案例、归并条目 ─────────────────────────────────────────────
 def entry_key(machine, unit, code, symptom_key) -> str:
-    ck = _code_key(code)
+    ck = match_key(code)        # 4C-04 / STG-4C-04 / ST-4C-04 归到同一个条目
     return f"{machine}|{unit}|" + (f"code:{ck}" if ck else f"sym:{_norm_text(symptom_key)[:30]}")
+
+
+def remerge(log=print) -> int:
+    """按新的 entry_key 重新归并现场条目（同码不同写法被拆开的合起来），合并后重新整理。返回合并掉的条目数。"""
+    c = _conn()
+    rows = c.execute("SELECT * FROM ts_entries WHERE COALESCE(origin,'field')='field'").fetchall()
+    keep, merged, touched = {}, 0, set()
+    for e in rows:
+        cs = c.execute("SELECT symptom_key, description FROM ts_cases WHERE entry_id=? LIMIT 1", (e["id"],)).fetchone()
+        sym = (cs["symptom_key"] or cs["description"]) if cs else e["title"]
+        k = entry_key(e["machine"], e["unit"], e["error_code"], sym)
+        if k in keep and keep[k] != e["id"]:
+            tgt = keep[k]
+            c.execute("UPDATE ts_cases SET entry_id=? WHERE entry_id=?", (tgt, e["id"]))
+            c.execute("DELETE FROM ts_entries WHERE id=?", (e["id"],))
+            touched.add(tgt)
+            merged += 1
+        else:
+            keep[k] = e["id"]
+            if e["entry_key"] != k:
+                c.execute("UPDATE ts_entries SET entry_key=? WHERE id=?", (k, e["id"]))
+    c.commit()
+    refresh_entries(c, touched, log)
+    backfill_match_keys(c)
+    c.close()
+    log(f"重新归并：合并掉 {merged} 个重复条目，重新整理 {len(touched)} 个")
+    return merged
 
 
 def add_case(c, machine: str, case: dict, src_doc: str, section: str, customer: str, review="pending") -> tuple:

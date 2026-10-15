@@ -28,12 +28,17 @@ def main():
     ap.add_argument("--import", dest="xlsx", default=None)
     ap.add_argument("--customer", default="none")
     ap.add_argument("--import-oem", dest="oem", default=None, help="导入 ts_parse_oem_guide.py 生成的 JSON")
+    ap.add_argument("--remerge", action="store_true", help="按新规则重新归并现场条目（同码不同写法合并）")
     a = ap.parse_args()
     from src import ts_table
-    if (a.xlsx or not a.stats) and not a.oem:
+    if (a.xlsx or not a.stats) and not a.oem and not a.remerge:
         from src.engine import _init_engine
         _init_engine()                      # 初始化 LLM（deepseek）
-    if a.oem:
+    if a.remerge:
+        from src.engine import _init_engine
+        _init_engine()
+        ts_table.remerge(log=lambda m: print(m, flush=True))
+    elif a.oem:
         ts_table.import_oem(a.oem, log=lambda m: print(m, flush=True))
     elif a.xlsx:
         st = ts_table.import_xlsx(a.xlsx, customer=a.customer, log=lambda m: print(m, flush=True))
