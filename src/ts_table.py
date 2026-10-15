@@ -66,6 +66,12 @@ def _conn():
         notes TEXT DEFAULT '', edited_by TEXT, updated_at TEXT);
     CREATE TABLE IF NOT EXISTS ts_windows (hash TEXT PRIMARY KEY, src_doc TEXT, n_cases INTEGER, done_at TEXT);
     """)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(ts_entries)")}
+    for col, ddl in (("origin", "TEXT DEFAULT 'field'"), ("oem_detail", "TEXT DEFAULT '[]'"),
+                     ("src", "TEXT DEFAULT ''"), ("match_key", "TEXT DEFAULT ''")):
+        if col not in cols:
+            c.execute(f"ALTER TABLE ts_entries ADD COLUMN {col} {ddl}")
+    c.execute("CREATE INDEX IF NOT EXISTS ix_entry_match ON ts_entries(machine, match_key)")
     return c
 
 
@@ -86,6 +92,17 @@ def _code_key(code: str) -> str:
     """多个代码时取第一个、去空格大写，作归并用。"""
     first = re.split(r"[；;／/]", code or "")[0]
     return re.sub(r"\s+", "", first).upper()[:60]
+
+
+def match_key(code: str) -> str:
+    """跨来源对错误码：STG-4A-1B / 4A-1B / #4AH-1B → 4A-1B；8 位码原样；没有码返回空。"""
+    k = _code_key(code)
+    k = re.sub(r"^(STG|ST|WS|RS|WL|RL|AF|LC|MAC)[-_:]", "", k)
+    k = k.lstrip("#")
+    m = re.match(r"^([0-9A-F]{2})H?[-_]?([0-9A-FX]{2})H?$", k)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    return k
 
 
 def _parse_json(text: str, kind="list"):
@@ -209,10 +226,10 @@ def add_case(c, machine: str, case: dict, src_doc: str, section: str, customer: 
     if row:
         eid = row["id"]
     else:
-        eid = c.execute("""INSERT INTO ts_entries(entry_key, machine, unit, error_code, title, updated_at)
-                           VALUES (?,?,?,?,?,?)""",
+        eid = c.execute("""INSERT INTO ts_entries(entry_key, machine, unit, error_code, title, updated_at, match_key)
+                           VALUES (?,?,?,?,?,?,?)""",
                         (key, machine, case.get("unit", "其他"), case.get("error_code", ""),
-                         case.get("description") or sym, _now())).lastrowid
+                         case.get("description") or sym, _now(), match_key(case.get("error_code", "")))).lastrowid
     date = (case.get("reg_date") or "")[:10]
     vals = {k: case.get(k, "") for k in CASE_COLS}
     vals.update(machine=machine, reg_date=date)
@@ -370,9 +387,16 @@ def run(limit: int = 0, only_doc: str = None, log=print) -> dict:
         stat["cases"] += n_new
         log(f"  {src_doc[:36]:36s} {section[:28]:28s} → {len(cases)} 条（新 {n_new}）")
     refresh_entries(c, stat["entries"], log)
+    backfill_match_keys(c)
     stat["entries"] = len(stat["entries"])
     c.close()
     return stat
+
+
+def backfill_match_keys(c):
+    for r in c.execute("SELECT id, error_code FROM ts_entries WHERE COALESCE(match_key,'')='' AND COALESCE(error_code,'')<>''").fetchall():
+        c.execute("UPDATE ts_entries SET match_key=? WHERE id=?", (match_key(r["error_code"]), r["id"]))
+    c.commit()
 
 
 def import_xlsx(path: str, customer: str = "none", log=print) -> dict:
@@ -406,6 +430,51 @@ def import_xlsx(path: str, customer: str = "none", log=print) -> dict:
     return {"cases": n, "entries": len(eids)}
 
 
+def import_oem(json_path: str, log=print) -> dict:
+    """导入 ts_parse_oem_guide.py 解析出的原厂 Troubleshooting Guide（origin=oem，直接算已确认）。可重复导入（按 entry_key 覆盖）。"""
+    items = json.load(open(json_path, encoding="utf-8"))
+    c = _conn()
+    n = 0
+    for x in items:
+        code = x.get("error_code", "")
+        key = f"oem|{x['src']}|{x['machine']}|{x['unit']}|{x.get('axis', '')}|{code or _norm_text(x['title'])[:40]}"
+        if code and x["src"].startswith("WS RS") and re.match(r"^[0-9A-F]{2}-[0-9A-FX]{2}$", code, re.I):
+            code = f"STG-{code.upper()}"     # 原厂表里的 5A-1C = 机台上显示的 STG-5A-1C
+        causes = x.get("causes") or []
+        rcs = [{"cause": cz["cause"], "category": "", "count": cz.get("rate") or i + 1} for i, cz in enumerate(causes)]
+        sols = [{"action": st["check"] + (f"（{st['details']}）" if st.get("details") else ""), "count": 0}
+                for cz in causes for st in cz.get("steps", []) if st.get("check")]
+        title = x["title"] + (f"｜{x['axis']} 轴" if x.get("axis") else "")
+        c.execute("""INSERT INTO ts_entries(entry_key, machine, unit, error_code, title, root_causes, solutions,
+                         origin, oem_detail, src, match_key, status, occ_count, updated_at)
+                     VALUES (?,?,?,?,?,?,?, 'oem', ?,?,?, 'confirmed', 0, ?)
+                     ON CONFLICT(entry_key) DO UPDATE SET title=excluded.title, root_causes=excluded.root_causes,
+                         solutions=excluded.solutions, oem_detail=excluded.oem_detail, updated_at=excluded.updated_at""",
+                  (key, x["machine"], x["unit"], code, title, json.dumps(rcs, ensure_ascii=False),
+                   json.dumps(sols, ensure_ascii=False), json.dumps(causes, ensure_ascii=False), x["src"],
+                   match_key(code), _now()))
+        n += 1
+    c.commit()
+    backfill_match_keys(c)      # 补上加字段之前建的现场条目的匹配键
+    c.close()
+    log(f"导入原厂条目 {n} 个")
+    return {"entries": n}
+
+
+def related(eid: int, user=None, admin=False) -> list:
+    """同机型、同错误码的另一来源条目（现场 ↔ 原厂）。"""
+    c = _conn()
+    e = c.execute("SELECT * FROM ts_entries WHERE id=?", (eid,)).fetchone()
+    if not e or not e["match_key"]:
+        c.close()
+        return []
+    rows = c.execute("SELECT * FROM ts_entries WHERE machine=? AND match_key=? AND id<>? AND origin<>?",
+                     (e["machine"], e["match_key"], eid, e["origin"] or "field")).fetchall()
+    out = [dict(r) for r in rows if _visible(user, r, admin, c)]
+    c.close()
+    return out
+
+
 # ── 5. 查询 / 可见性 / 编辑（网页和智能体用）────────────────────────────
 def _visible(user, e, admin: bool, conn=None) -> bool:
     from src import acl
@@ -413,6 +482,8 @@ def _visible(user, e, admin: bool, conn=None) -> bool:
         return True
     if e["status"] != "confirmed":
         return False
+    if (e["origin"] or "field") == "oem":
+        return acl.can_see(user, "oem_manual", e["machine"])
     if not acl.can_see(user, "fault_history", e["machine"]):
         return False
     custs = [x for x in (e["customers"] or "").split(",") if x]
@@ -429,9 +500,12 @@ def _visible(user, e, admin: bool, conn=None) -> bool:
     return True
 
 
-def search(user=None, admin=False, machine="", unit="", status="", keyword="", want_models=None, limit=300) -> list:
+def search(user=None, admin=False, machine="", unit="", status="", keyword="", want_models=None, limit=5000,
+           origin="") -> list:
     c = _conn()
     sql, params = "SELECT * FROM ts_entries WHERE 1=1", []
+    if origin:
+        sql += " AND COALESCE(origin,'field')=?"; params.append(origin)
     if machine:
         sql += " AND machine=?"; params.append(machine)
     if unit:
@@ -440,7 +514,7 @@ def search(user=None, admin=False, machine="", unit="", status="", keyword="", w
         sql += " AND has_new=1"
     elif status:
         sql += " AND status=?"; params.append(status)
-    rows = c.execute(sql + " ORDER BY occ_count DESC, last_date DESC", params).fetchall()
+    rows = c.execute(sql + " ORDER BY (COALESCE(origin,'field')='oem'), occ_count DESC, last_date DESC, id", params).fetchall()
     kw = [k.lower() for k in re.split(r"\s+", (keyword or "").strip()) if k]
     out = []
     for e in rows:
@@ -449,7 +523,7 @@ def search(user=None, admin=False, machine="", unit="", status="", keyword="", w
         if not _visible(user, e, admin, c):
             continue
         if kw:
-            hay = " ".join(str(e[k] or "") for k in ("error_code", "title", "root_causes", "solutions", "unit")).lower()
+            hay = " ".join(str(e[k] or "") for k in ("error_code", "match_key", "title", "root_causes", "solutions", "unit")).lower()
             if not all(k in hay for k in kw):
                 continue
         out.append(dict(e))
@@ -497,12 +571,15 @@ def save_entry(admin: str, eid: int, **fields) -> str:
 def lookup_for_agent(query: str, user, want_models=None, k: int = 4) -> str:
     """智能体用：按故障代码 / 关键词找已确认条目，输出现场验证过的根因、解决措施、弯路。"""
     q = (query or "").strip()
-    codes = re.findall(r"[A-Z]{2,5}-[0-9A-F]{1,2}(?:-[0-9A-F]{1,2})?|[0-9A-F]{8}|[0-9A-F]{4}", q.upper())
+    codes = re.findall(r"[A-Z]{2,5}-[0-9A-F]{1,2}(?:-[0-9A-F]{1,2})?|#?[0-9A-F]{2}H?-[0-9A-F]{2}|[0-9A-F]{8}|[0-9A-F]{4}", q.upper())
+    mkeys = {match_key(cd) for cd in codes} - {""}
     hits = []
-    for e in search(user, admin=False, status="confirmed", want_models=want_models, limit=1000):
+    for e in search(user, admin=False, status="confirmed", want_models=want_models):
         score = 0
         ec = _code_key(e["error_code"])
-        if ec and any(cd in ec or ec in cd for cd in codes):
+        if e["match_key"] and e["match_key"] in mkeys:
+            score += 12
+        elif ec and any(cd in ec or ec in cd for cd in codes):
             score += 10
         hay = " ".join(str(e[f] or "") for f in ("title", "root_causes", "solutions", "error_code", "unit")).lower()
         score += sum(1 for w in re.split(r"[\s,，、]+", q.lower()) if len(w) >= 2 and w in hay)
@@ -517,6 +594,14 @@ def lookup_for_agent(query: str, user, want_models=None, k: int = 4) -> str:
         sols = json.loads(e["solutions"] or "[]")
         dets = json.loads(e["detours"] or "[]")
         occ = [d for d in json.loads(e["occ_dates"] or "[]") if d]
+        if (e["origin"] or "field") == "oem":
+            det = json.loads(e["oem_detail"] or "[]")
+            out.append(f"【原厂 Troubleshooting Guide｜{e['machine']}｜{e['unit']}｜{e['error_code'] or '无代码'}】{e['title']}\n"
+                       + "\n".join(f"  原因{cz.get('rate')}（按发生频度）：{cz.get('cause')}\n"
+                                   + "\n".join(f"    → {st.get('check')}" + (f"：{st.get('details')[:160]}" if st.get('details') else "")
+                                               for st in cz.get("steps", [])[:4]) for cz in det[:4])
+                       + f"\n  （来源：{e['src']}）")
+            continue
         out.append(
             f"【Troubleshooting 表｜{e['machine']}｜{e['unit']}｜{e['error_code'] or '无代码'}】{e['title']}"
             f"（现场发生 {e['occ_count']} 次{('：' + '、'.join(occ[:6])) if occ else ''}）\n"

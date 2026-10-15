@@ -27,12 +27,15 @@ def main():
     ap.add_argument("--stats", action="store_true")
     ap.add_argument("--import", dest="xlsx", default=None)
     ap.add_argument("--customer", default="none")
+    ap.add_argument("--import-oem", dest="oem", default=None, help="导入 ts_parse_oem_guide.py 生成的 JSON")
     a = ap.parse_args()
     from src import ts_table
-    if a.xlsx or not a.stats:
+    if (a.xlsx or not a.stats) and not a.oem:
         from src.engine import _init_engine
         _init_engine()                      # 初始化 LLM（deepseek）
-    if a.xlsx:
+    if a.oem:
+        ts_table.import_oem(a.oem, log=lambda m: print(m, flush=True))
+    elif a.xlsx:
         st = ts_table.import_xlsx(a.xlsx, customer=a.customer, log=lambda m: print(m, flush=True))
         print(f"导入案例 {st['cases']} 条，归并到 {st['entries']} 个条目（已确认）")
     elif not a.stats:

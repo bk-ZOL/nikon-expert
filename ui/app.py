@@ -626,23 +626,24 @@ def _ts_lines(items, fmt):
     return "\n".join(fmt(x) for x in items)
 
 
-def ts_query(machine, unit, status, kw, request: gr.Request = None):
+def ts_query(machine, unit, status, kw, origin="", request: gr.Request = None):
     from src import ts_table, acl
     admin = _is_admin_user(request)
     user = _ts_user(request)
     if acl.security_enabled() and user is None:
         return "⛔ 未登录。", pd.DataFrame(), gr.update(choices=[], value=None)
     rows = ts_table.search(user, admin=admin, machine=machine or "", unit=unit or "",
-                           status=(status or "") if admin else "confirmed", keyword=kw or "")
+                           status=(status or "") if admin else "confirmed", keyword=kw or "", origin=origin or "")
     st_label = {"pending": "待确认", "confirmed": "已确认", "rejected": "已驳回"}
     table = []
     for e in rows:
         sols = json.loads(e["solutions"] or "[]")
         rcs = json.loads(e["root_causes"] or "[]")
-        table.append({"编号": e["id"], "机型": e["machine"], "Unit": e["unit"], "故障代码": e["error_code"] or "—",
+        table.append({"编号": e["id"], "来源": "原厂" if e.get("origin") == "oem" else "现场",
+                      "机型": e["machine"], "Unit": e["unit"], "故障代码": e["error_code"] or "—",
                       "报警/问题描述": e["title"], "发生次数": e["occ_count"],
                       "主要根因": rcs[0].get("cause", "") if rcs else "待查",
-                      "最有效措施": sols[0].get("action", "") if sols else "（未解决）",
+                      "最有效措施": (sols[0].get("action", "")[:80] if sols else ("（Guide 未写）" if e.get("origin") == "oem" else "（未解决）")),
                       "最近": e["last_date"] or "—",
                       **({"状态": st_label.get(e["status"], e["status"]) + (" · 有新案例" if e["has_new"] else "")} if admin else {})})
     df = pd.DataFrame(table)
@@ -650,7 +651,9 @@ def ts_query(machine, unit, status, kw, request: gr.Request = None):
         for col in ("报警/问题描述", "主要根因", "最有效措施"):
             df[col] = df[col].astype(str).map(_mask)
     picks = [(f"#{e['id']} {e['machine']}｜{e['unit']}｜{e['error_code'] or ''} {e['title'][:30]}", e["id"]) for e in rows]
-    return f"共 **{len(rows)}** 个条目。下拉选一个看详情。", df, gr.update(choices=picks, value=None)
+    n_oem = sum(1 for e in rows if e.get("origin") == "oem")
+    return (f"共 **{len(rows)}** 个条目（现场 {len(rows) - n_oem}、原厂 {n_oem}）。下拉选一个看详情。",
+            df, gr.update(choices=picks, value=None))
 
 
 def ts_detail(eid, request: gr.Request = None):
@@ -665,6 +668,25 @@ def ts_detail(eid, request: gr.Request = None):
     if not d:
         return ["⛔ 没有这个条目的查看权限。"] + empty
     e, cases = d["entry"], d["cases"]
+    rel = ts_table.related(int(eid), user, admin)
+    if e.get("origin") == "oem":
+        det = json.loads(e["oem_detail"] or "[]")
+        md = [f"### #{e['id']} {e['title']}",
+              f"**原厂 Troubleshooting Guide｜{e['machine']}｜{e['unit']}｜故障代码：{e['error_code'] or '—'}**",
+              f"来源：{e['src']}", ""]
+        if not det:
+            md.append("Guide 只列了错误名称，没有写原因和对策。")
+        for cz in det:
+            md.append(f"**原因 {cz.get('rate')}（按发生频度）：{cz.get('cause')}**")
+            for i, st in enumerate(cz.get("steps", []), 1):
+                md.append(f"{i}. {st.get('check') or '—'}" + (f"\n    - {st['details']}" if st.get("details") else ""))
+            md.append("")
+        for r in rel:
+            sols = json.loads(r["solutions"] or "[]")
+            md += [f"---", f"**现场处理过 {r['occ_count']} 次**（条目 #{r['id']}）：{r['title']}",
+                   "有效措施：" + ("；".join(x.get("action", "") for x in sols[:3]) or "暂无")]
+        text = "\n".join(md)
+        return [text if admin else _mask(text), e["title"], e["unit"], e["error_code"] or "", "", "", "", "", e["notes"] or "", e["status"]]
     rcs = json.loads(e["root_causes"] or "[]"); sols = json.loads(e["solutions"] or "[]")
     dets = json.loads(e["detours"] or "[]"); proc = json.loads(e["follow_up"] or "[]")
     parts = json.loads(e["parts"] or "[]"); occ = [x for x in json.loads(e["occ_dates"] or "[]") if x]
@@ -684,6 +706,10 @@ def ts_detail(eid, request: gr.Request = None):
     refs = json.loads(e["oem_refs"] or "[]")
     if refs and (admin or acl.can_see(user, "oem_manual", e["machine"])):
         md += ["", "**原厂对策**"] + [f"> 《{r['doc']}》{r['section']}：{r['text'][:300]}" for r in refs]
+    for r in rel:
+        md += ["", f"**原厂 Guide 对这个代码的说明**（条目 #{r['id']}，{r['src']}）："]
+        for cz in json.loads(r["oem_detail"] or "[]")[:4]:
+            md.append(f"- 原因 {cz.get('rate')}：{cz.get('cause')} → " + "；".join(st.get("check", "") for st in cz.get("steps", [])[:3]))
     if e["notes"]:
         md += ["", f"**备注**：{e['notes']}"]
     md += ["", f"**现场记录（{len(cases)} 条）**", "", "| 日期 | 描述 | 排查过程 | 解决措施 | Root cause | 状态 | 来源 |", "|---|---|---|---|---|---|---|"]
@@ -1213,6 +1239,7 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
             ts_f_unit = gr.Dropdown(label="Unit", choices=[("全部", "")] + __import__("src.ts_table", fromlist=["UNITS"]).UNITS, value="")
             ts_f_status = gr.Dropdown(label="状态（管理员）", choices=[("全部", ""), ("待确认", "pending"), ("已确认", "confirmed"),
                                                                 ("有新案例", "has_new"), ("已驳回", "rejected")], value="")
+            ts_f_origin = gr.Dropdown(label="来源", choices=[("全部", ""), ("现场", "field"), ("原厂 Guide", "oem")], value="")
             ts_f_kw = gr.Textbox(label="关键词 / 故障代码")
         ts_btn = gr.Button("查询", variant="primary")
         ts_msg = gr.Markdown("")
@@ -1307,7 +1334,7 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
     nav_kb.click(lambda: _switch_view("kb"), None, _nav_out)
     nav_log.click(lambda: _switch_view("worklog"), None, _nav_out)
     nav_err.click(lambda: _switch_view("err"), None, _nav_out)
-    _ts_filters = [ts_f_machine, ts_f_unit, ts_f_status, ts_f_kw]
+    _ts_filters = [ts_f_machine, ts_f_unit, ts_f_status, ts_f_kw, ts_f_origin]
     nav_ts.click(lambda: _switch_view("ts"), None, _nav_out).then(ts_query, _ts_filters, [ts_msg, ts_df, ts_pick])
     ts_btn.click(ts_query, _ts_filters, [ts_msg, ts_df, ts_pick])
     ts_f_kw.submit(ts_query, _ts_filters, [ts_msg, ts_df, ts_pick])
