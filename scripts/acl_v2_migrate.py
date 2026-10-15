@@ -149,7 +149,7 @@ def main():
     url = os.getenv("QDRANT_URL")
     coll = os.getenv("COLLECTION_NAME", "nikon_expert_v1")
     if args.commit and url:
-        client = QdrantClient(url=url)
+        client = QdrantClient(url=url, timeout=300)   # 大文档（上万个向量）一次 set_payload 会超过默认 5 秒
         for field in ("category", "customer", "models"):
             try:
                 client.create_payload_index(coll, field_name=field, field_schema="keyword")

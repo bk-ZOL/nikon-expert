@@ -202,7 +202,7 @@ def _set_qdrant_payload(doc_name: str, c: dict):
         return  # 文件模式(无 URL)不处理；生产是 server 模式
     from qdrant_client import QdrantClient, models as qm
     collection = os.getenv("COLLECTION_NAME", "nikon_expert_v1")
-    client = QdrantClient(url=url)
+    client = QdrantClient(url=url, timeout=300)   # 大文档（上万个向量）一次 set_payload 会超过默认 5 秒
     client.set_payload(
         collection_name=collection,
         payload={"sec_level": c["sec_level"], "owner_scope": c["owner_scope"],
