@@ -612,7 +612,7 @@ def lookup_for_agent(query: str, user, want_models=None, k: int = 4) -> str:
     names = []
     for ctrl, main, det in parse(q):
         txt = code_lookup(f"{ctrl}-{main}-{det}" if det else f"{ctrl}-{main}") or ""
-        m = re.search(r"#[0-9A-F]{2}H[^）)]*[）)]：\s*(.+?)(?:\(|（|\n|$)", txt)
+        m = re.search(rf"#{main}H[^）)]*[）)]：\s*(.+?)(?:\(|（|\n|$)", txt)   # 必须是这个主码自己的名称
         if m and len(_norm_text(m.group(1))) >= 8:
             names.append(_norm_text(m.group(1))[:10])     # 去空格标点比前 10 个字：容忍「No return FP (WT) response」这种插字
     hits = []
