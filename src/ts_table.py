@@ -601,26 +601,43 @@ def save_entry(admin: str, eid: int, **fields) -> str:
 
 
 def lookup_for_agent(query: str, user, want_models=None, k: int = 4) -> str:
-    """智能体用：按故障代码 / 关键词找已确认条目，输出现场验证过的根因、解决措施、弯路。"""
-    from src.error_code import annotate
+    """智能体用：按故障代码 / 关键词找已确认条目，输出现场验证过的根因、解决措施、弯路，以及原厂 Guide。
+    问题里有错误码时只认码对得上的（同码 > 同报警名称 > 同主码参考），不再按关键词乱配。"""
+    from src.error_code import annotate, parse, lookup as code_lookup
     q = annotate((query or "").strip())
     codes = re.findall(r"[A-Z]{2,5}-[0-9A-F]{1,2}(?:-[0-9A-F]{1,2})?|#?[0-9A-F]{2}H?-[0-9A-F]{2}|[0-9A-F]{8}|[0-9A-F]{4}", q.upper())
     mkeys = {match_key(cd) for cd in codes} - {""}
+    mains = {mk.split("-")[0] for mk in mkeys if re.match(r"^[0-9A-F]{2}-", mk)}
+    # 报警名称：STG 码换算后从原文 / 手册取主码名称（现场记录常只抄了报警文字、没记数字）
+    names = []
+    for ctrl, main, det in parse(q):
+        txt = code_lookup(f"{ctrl}-{main}-{det}" if det else f"{ctrl}-{main}") or ""
+        m = re.search(r"#[0-9A-F]{2}H[^）)]*[）)]：\s*(.+?)(?:\(|（|\n|$)", txt)
+        if m and len(m.group(1).strip()) >= 8:
+            names.append(re.sub(r"\s+", " ", m.group(1).strip().lower())[:28])
     hits = []
     for e in search(user, admin=False, status="confirmed", want_models=want_models):
-        score = 0
+        score, why = 0, ""
         ec = _code_key(e["error_code"])
-        if e["match_key"] and e["match_key"] in mkeys:
-            score += 12
-        elif ec and any(cd in ec or ec in cd for cd in codes):
-            score += 10
         hay = " ".join(str(e[f] or "") for f in ("title", "root_causes", "solutions", "error_code", "unit")).lower()
-        score += sum(1 for w in re.split(r"[\s,，、]+", q.lower()) if len(w) >= 2 and w in hay)
+        hay1 = re.sub(r"\s+", " ", hay)
+        if e["match_key"] and e["match_key"] in mkeys:
+            score, why = 12, ""
+        elif ec and any(cd in ec or ec in cd for cd in codes if len(cd) >= 4):
+            score, why = 10, ""
+        elif names and any(n in hay1 for n in names):
+            score, why = 8, "（同报警名称，现场当时没记数字代码）"
+        elif mains and e["match_key"][:2] in mains and re.match(r"^[0-9A-F]{2}-", e["match_key"] or ""):
+            score, why = 3, f"（同主码 {e['match_key'][:2]}，仅供参考）"
+        elif not codes:
+            score = sum(1 for w in re.split(r"[\s,，、]+", q.lower()) if len(w) >= 2 and w in hay)
         if score:
+            e = dict(e); e["_why"] = why
             hits.append((score, e))
     hits.sort(key=lambda x: (-x[0], -(x[1]["occ_count"] or 0)))
     if not hits:
-        return "Troubleshooting 表里没有已确认的相关条目。"
+        return ("Troubleshooting 表里没有这个代码（" + "、".join(sorted(mkeys)) + "）的已确认条目。") if mkeys \
+            else "Troubleshooting 表里没有已确认的相关条目。"
     out = []
     for _, e in hits[:k]:
         rcs = json.loads(e["root_causes"] or "[]")
@@ -629,14 +646,14 @@ def lookup_for_agent(query: str, user, want_models=None, k: int = 4) -> str:
         occ = [d for d in json.loads(e["occ_dates"] or "[]") if d]
         if (e["origin"] or "field") == "oem":
             det = json.loads(e["oem_detail"] or "[]")
-            out.append(f"【原厂 Troubleshooting Guide｜{e['machine']}｜{e['unit']}｜{e['error_code'] or '无代码'}】{e['title']}\n"
+            out.append(f"【原厂 Troubleshooting Guide｜{e['machine']}｜{e['unit']}｜{e['error_code'] or '无代码'}】{e['title']}{e.get('_why', '')}\n"
                        + "\n".join(f"  原因{cz.get('rate')}（按发生频度）：{cz.get('cause')}\n"
                                    + "\n".join(f"    → {st.get('check')}" + (f"：{st.get('details')[:160]}" if st.get('details') else "")
                                                for st in cz.get("steps", [])[:4]) for cz in det[:4])
                        + f"\n  （来源：{e['src']}）")
             continue
         out.append(
-            f"【Troubleshooting 表｜{e['machine']}｜{e['unit']}｜{e['error_code'] or '无代码'}】{e['title']}"
+            f"【Troubleshooting 表｜{e['machine']}｜{e['unit']}｜{e['error_code'] or '无代码'}】{e['title']}{e.get('_why', '')}"
             f"（现场发生 {e['occ_count']} 次{('：' + '、'.join(occ[:6])) if occ else ''}）\n"
             + "  Root cause：" + ("；".join(f"{x.get('cause')}（{x.get('category', '')}，{x.get('count', 1)}次）" for x in rcs[:5]) or "待查") + "\n"
             + "  解决措施：" + ("；".join(f"{x.get('action')}（解决 {x.get('count', 1)} 次）" for x in sols[:5]) or "暂无") + "\n"
