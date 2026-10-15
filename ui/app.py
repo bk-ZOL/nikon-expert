@@ -642,6 +642,8 @@ def ts_query(machine, unit, status, kw, origin="", request: gr.Request = None):
         table.append({"编号": e["id"], "来源": "原厂" if e.get("origin") == "oem" else "现场",
                       "机型": e["machine"], "Unit": e["unit"], "故障代码": e["error_code"] or "—",
                       "报警/问题描述": e["title"], "发生次数": e["occ_count"],
+                      "经验构成": ("原厂" if e.get("origin") == "oem" else (e.get("exp_mix") or "—")),
+                      "根因数": len(rcs) if rcs else 0,
                       "主要根因": rcs[0].get("cause", "") if rcs else "待查",
                       "最有效措施": (sols[0].get("action", "")[:80] if sols else ("（Guide 未写）" if e.get("origin") == "oem" else "（未解决）")),
                       "最近": e["last_date"] or "—",
@@ -657,8 +659,8 @@ def ts_query(machine, unit, status, kw, origin="", request: gr.Request = None):
 
 
 def ts_detail(eid, request: gr.Request = None):
-    """详情 markdown + 管理员编辑表单的值。"""
-    from src import ts_table, acl
+    """详情（统一报警视图：Root cause 全列、原厂推荐 / 现场有效 / 翻新有效分栏）+ 管理员编辑表单的值。"""
+    from src import ts_table
     empty = ["", "", "", "", "", "", "", "", ""]
     if not eid:
         return ["选一个条目查看详情。"] + empty
@@ -669,63 +671,41 @@ def ts_detail(eid, request: gr.Request = None):
         return ["⛔ 没有这个条目的查看权限。"] + empty
     e, cases = d["entry"], d["cases"]
     rel = ts_table.related(int(eid), user, admin)
-    if e.get("origin") == "oem":
-        det = json.loads(e["oem_detail"] or "[]")
-        md = [f"### #{e['id']} {e['title']}",
-              f"**原厂 Troubleshooting Guide｜{e['machine']}｜{e['unit']}｜故障代码：{e['error_code'] or '—'}**",
-              f"来源：{e['src']}", ""]
-        if not det:
-            md.append("Guide 只列了错误名称，没有写原因和对策。")
-        for cz in det:
-            md.append(f"**原因 {cz.get('rate')}（按发生频度）：{cz.get('cause')}**")
-            for i, st in enumerate(cz.get("steps", []), 1):
-                md.append(f"{i}. {st.get('check') or '—'}" + (f"\n    - {st['details']}" if st.get("details") else ""))
-            md.append("")
-        for r in rel:
-            sols = json.loads(r["solutions"] or "[]")
-            md += [f"---", f"**现场处理过 {r['occ_count']} 次**（条目 #{r['id']}）：{r['title']}",
-                   "有效措施：" + ("；".join(x.get("action", "") for x in sols[:3]) or "暂无")]
-        text = "\n".join(md)
-        return [text if admin else _mask(text), e["title"], e["unit"], e["error_code"] or "", "", "", "", "", e["notes"] or "", e["status"]]
-    rcs = json.loads(e["root_causes"] or "[]"); sols = json.loads(e["solutions"] or "[]")
-    dets = json.loads(e["detours"] or "[]"); proc = json.loads(e["follow_up"] or "[]")
-    parts = json.loads(e["parts"] or "[]"); occ = [x for x in json.loads(e["occ_dates"] or "[]") if x]
-    md = [f"### #{e['id']} {e['title']}",
-          f"**{e['machine']}｜{e['unit']}｜故障代码：{e['error_code'] or '—'}**　发生 **{e['occ_count']}** 次"
-          + (f"（{'、'.join(occ)}）" if occ else "") + (f"　未关闭 {e['open_count']} 次" if e["open_count"] else ""),
-          "", "**Root cause**（按出现次数）"]
-    md += [f"{i}. {x.get('cause')}　`{x.get('category', '')}` × {x.get('count', 1)}" for i, x in enumerate(rcs, 1)] or ["- 待查"]
-    md += ["", "**解决措施**（真正解决过问题的）"]
-    md += [f"{i}. {x.get('action')}　✅ 解决 {x.get('count', 1)} 次" for i, x in enumerate(sols, 1)] or ["- 还没有解决过"]
-    if dets:
-        md += ["", "**少走弯路**（试过但没用的）"] + [f"- {x}" for x in dets]
+    rel_cases = []
+    for r in rel:
+        if (r.get("origin") or "field") != "oem":
+            rd = ts_table.entry_detail(int(r["id"]), user, admin)
+            rel_cases += rd.get("cases", []) if rd else []
+    md = [f"### #{e['id']} {e['title']}", ts_table.alarm_view(e, rel)]
+    proc = json.loads(e["follow_up"] or "[]") if (e.get("origin") or "field") != "oem" else []
     if proc:
         md += ["", "**建议处理顺序**"] + [f"{i}. {x}" for i, x in enumerate(proc, 1)]
+    parts = json.loads(e["parts"] or "[]")
     if parts:
         md += ["", "**更换过的备件**：" + "、".join(parts)]
-    refs = json.loads(e["oem_refs"] or "[]")
-    if refs and (admin or acl.can_see(user, "oem_manual", e["machine"])):
-        md += ["", "**原厂对策**"] + [f"> 《{r['doc']}》{r['section']}：{r['text'][:300]}" for r in refs]
-    for r in rel:
-        md += ["", f"**原厂 Guide 对这个代码的说明**（条目 #{r['id']}，{r['src']}）："]
-        for cz in json.loads(r["oem_detail"] or "[]")[:4]:
-            md.append(f"- 原因 {cz.get('rate')}：{cz.get('cause')} → " + "；".join(st.get("check", "") for st in cz.get("steps", [])[:3]))
+    if e.get("src"):
+        md += ["", f"原厂来源：{e['src']}"]
     if e["notes"]:
         md += ["", f"**备注**：{e['notes']}"]
-    md += ["", f"**现场记录（{len(cases)} 条）**", "", "| 日期 | 描述 | 排查过程 | 解决措施 | Root cause | 状态 | 来源 |", "|---|---|---|---|---|---|---|"]
-    for x in cases:
-        ds = json.loads(x["dates"] or "[]")
-        when = (ds[0] + (f" 等 {len(ds)} 天" if len(ds) > 1 else "")) if ds else (x["reg_date"] or "—")
-        cell = lambda v: (v or "—").replace("|", "／").replace("\n", " ")[:160]
-        md.append(f"| {when} | {cell(x['description'])} | {cell(x['process'])} | {cell(x['solution'])} | "
-                  f"{cell(x['root_cause'])}（{x['rc_category'] or '待查'}） | {x['status']} | {cell(x['src_doc'])} {x['case_no'] or ''} |")
+    allc = cases + rel_cases
+    if allc:
+        md += ["", f"**现场 / 翻新记录明细（{len(allc)} 条）**", "",
+               "| 经验 | 日期 | 描述 | 排查过程 | 解决措施 | Root cause | 状态 | 来源 |", "|---|---|---|---|---|---|---|---|"]
+        for x in allc:
+            ds = json.loads(x["dates"] or "[]")
+            when = (ds[0] + (f" 等 {len(ds)} 天" if len(ds) > 1 else "")) if ds else (x["reg_date"] or "—")
+            cell = lambda v: (v or "—").replace("|", "／").replace("\n", " ")[:160]
+            md.append(f"| {x.get('exp_type') or ts_table.exp_type_of(x['src_doc'])} | {when} | {cell(x['description'])} | "
+                      f"{cell(x['process'])} | {cell(x['solution'])} | {cell(x['root_cause'])}（{x['rc_category'] or '待查'}） | "
+                      f"{x['status']} | {cell(x['src_doc'])} {x['case_no'] or ''} |")
     text = "\n".join(md)
     if not admin:
         text = _mask(text)
+    rcs = json.loads(e["root_causes"] or "[]"); sols = json.loads(e["solutions"] or "[]")
     form = [e["title"], e["unit"], e["error_code"] or "",
-            _ts_lines(rcs, lambda x: f"{x.get('cause')}｜{x.get('category', '')}｜{x.get('count', 1)}"),
-            _ts_lines(sols, lambda x: f"{x.get('action')}｜{x.get('count', 1)}"),
-            "\n".join(dets), "\n".join(proc), e["notes"] or "", e["status"]]
+            _ts_lines(rcs, lambda x: f"{x.get('cause')}｜{x.get('category', '')}｜{x.get('field', x.get('count', 1))}｜{x.get('refurb', 0)}"),
+            _ts_lines(sols, lambda x: f"{x.get('action')}｜{x.get('field', x.get('count', 1))}｜{x.get('refurb', 0)}"),
+            "\n".join(json.loads(e["detours"] or "[]")), "\n".join(proc), e["notes"] or "", e["status"]]
     return [text] + form
 
 
@@ -745,13 +725,15 @@ def ts_save(eid, title, unit, code, rcs, sols, dets, proc, notes, status, reques
             d = {}
             for i, k in enumerate(keys):
                 v = parts[i] if i < len(parts) else ""
-                d[k] = int(v) if k == "count" and v.isdigit() else (1 if k == "count" else v)
+                d[k] = (int(v) if v.isdigit() else 0) if k in ("count", "field", "refurb") else v
             out.append(d)
+        for d in out:
+            d["count"] = int(d.get("field") or 0) + int(d.get("refurb") or 0) or 1
         return json.dumps(out, ensure_ascii=False)
     lines = lambda t: json.dumps([x.strip() for x in (t or "").splitlines() if x.strip()], ensure_ascii=False)
     return ts_table.save_entry(_admin_uid(request), int(eid), title=title, unit=unit, error_code=code,
-                               root_causes=rows(rcs, ["cause", "category", "count"]),
-                               solutions=rows(sols, ["action", "count"]), detours=lines(dets),
+                               root_causes=rows(rcs, ["cause", "category", "field", "refurb"]),
+                               solutions=rows(sols, ["action", "field", "refurb"]), detours=lines(dets),
                                follow_up=lines(proc), notes=notes, status=status)
 
 
@@ -1255,8 +1237,8 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
                 ts_e_code = gr.Textbox(label="故障代码")
                 ts_e_status = gr.Dropdown(label="状态", choices=[("待确认", "pending"), ("已确认（生效）", "confirmed"),
                                                                ("已驳回", "rejected")])
-            ts_e_rcs = gr.Textbox(label="Root cause（每行一条：根因｜根因分类｜次数）", lines=3)
-            ts_e_sols = gr.Textbox(label="解决措施（每行一条：措施｜解决次数）", lines=3)
+            ts_e_rcs = gr.Textbox(label="Root cause（每行一条：根因｜根因分类｜现场次数｜翻新次数）", lines=4)
+            ts_e_sols = gr.Textbox(label="解决措施（每行一条：措施｜现场解决次数｜翻新解决次数）", lines=4)
             ts_e_dets = gr.Textbox(label="少走弯路（每行一条：试过没用的动作）", lines=2)
             ts_e_proc = gr.Textbox(label="建议处理顺序（每行一步）", lines=3)
             ts_e_notes = gr.Textbox(label="备注", lines=1)

@@ -29,12 +29,21 @@ def main():
     ap.add_argument("--customer", default="none")
     ap.add_argument("--import-oem", dest="oem", default=None, help="导入 ts_parse_oem_guide.py 生成的 JSON")
     ap.add_argument("--remerge", action="store_true", help="按新规则重新归并现场条目（同码不同写法合并）")
+    ap.add_argument("--reconsolidate", action="store_true", help="所有现场条目按新规则重新整理（人工改过的不动）")
     a = ap.parse_args()
     from src import ts_table
-    if (a.xlsx or not a.stats) and not a.oem and not a.remerge:
+    if (a.xlsx or not a.stats) and not a.oem and not a.remerge and not a.reconsolidate:
         from src.engine import _init_engine
         _init_engine()                      # 初始化 LLM（deepseek）
-    if a.remerge:
+    if a.reconsolidate:
+        from src.engine import _init_engine
+        _init_engine()
+        c = ts_table._conn()
+        ids = [r[0] for r in c.execute("SELECT id FROM ts_entries WHERE COALESCE(origin,'field')='field' AND edited=0")]
+        print(f"重新整理 {len(ids)} 个现场条目…", flush=True)
+        ts_table.refresh_entries(c, ids, log=lambda m: print(m, flush=True))
+        c.close()
+    elif a.remerge:
         from src.engine import _init_engine
         _init_engine()
         ts_table.remerge(log=lambda m: print(m, flush=True))

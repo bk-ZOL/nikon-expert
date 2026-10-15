@@ -68,11 +68,25 @@ def _conn():
     """)
     cols = {r[1] for r in c.execute("PRAGMA table_info(ts_entries)")}
     for col, ddl in (("origin", "TEXT DEFAULT 'field'"), ("oem_detail", "TEXT DEFAULT '[]'"),
-                     ("src", "TEXT DEFAULT ''"), ("match_key", "TEXT DEFAULT ''")):
+                     ("src", "TEXT DEFAULT ''"), ("match_key", "TEXT DEFAULT ''"), ("exp_mix", "TEXT DEFAULT ''")):
         if col not in cols:
             c.execute(f"ALTER TABLE ts_entries ADD COLUMN {col} {ddl}")
+    if "exp_type" not in {r[1] for r in c.execute("PRAGMA table_info(ts_cases)")}:
+        c.execute("ALTER TABLE ts_cases ADD COLUMN exp_type TEXT DEFAULT ''")
+        for r in c.execute("SELECT id, src_doc FROM ts_cases").fetchall():
+            c.execute("UPDATE ts_cases SET exp_type=? WHERE id=?", (exp_type_of(r["src_doc"]), r["id"]))
+        c.commit()
     c.execute("CREATE INDEX IF NOT EXISTS ix_entry_match ON ts_entries(machine, match_key)")
     return c
+
+
+# 经验类型：厂内翻新（翻新 / 改造 / 厂内调试）、现场（客户现场装机、故障处理）；原厂推荐来自 Nikon Guide（origin=oem）
+EXP_REFURB, EXP_FIELD = "翻新", "现场"
+_REFURB_WORDS = [w for w in os.getenv("TS_REFURB_KEYWORDS", "翻新,厂内,改造,refurb").split(",") if w]
+
+
+def exp_type_of(src_doc: str) -> str:
+    return EXP_REFURB if any(w.lower() in (src_doc or "").lower() for w in _REFURB_WORDS) else EXP_FIELD
 
 
 def _now():
@@ -264,10 +278,11 @@ def add_case(c, machine: str, case: dict, src_doc: str, section: str, customer: 
     vals.update(machine=machine, reg_date=date)
     try:
         c.execute(f"""INSERT INTO ts_cases(entry_id, {", ".join(CASE_COLS)}, symptom_key, customer, dates,
-                      src_doc, src_section, dedup_key, review, created_at)
-                      VALUES ({",".join("?" * (len(CASE_COLS) + 9))})""",
+                      src_doc, src_section, dedup_key, review, created_at, exp_type)
+                      VALUES ({",".join("?" * (len(CASE_COLS) + 10))})""",
                   [eid] + [vals[k] for k in CASE_COLS] + [sym, customer, json.dumps([date] if date else []),
-                                                          src_doc, section, dedup, review, _now()])
+                                                          src_doc, section, dedup, review, _now(),
+                                                          exp_type_of(src_doc)])
         return eid, True
     except sqlite3.IntegrityError:
         if date:
@@ -304,16 +319,17 @@ def occurrences(cases) -> list:
     return sorted(out, key=lambda d: d or "9999")
 
 
-CONSOLIDATE_PROMPT = """下面是 Nikon {machine}「{unit}」同一类故障{code}的 {n} 条现场处理记录。请整理成 Troubleshooting 汇总的一行：
-- root_causes：根因（不是现象），意思相同的合并，按出现次数从多到少；只是推测的标「推定」；
-  category 只能从这里选：{rcs}；
-- solutions：真正解决过问题的措施，意思相同的合并，count = 解决过几次，按次数排序；
+CONSOLIDATE_PROMPT = """下面是 Nikon {machine}「{unit}」同一类故障{code}的 {n} 条处理记录，每条前面标了经验来源：
+【现场】= 客户现场装机 / 故障处理；【翻新】= 厂内翻新 / 改造 / 调试。请整理成 Troubleshooting 汇总的一行：
+- root_causes：**一个报警可能有多个根因，全部列出**（不是现象），意思相同的合并；按出现次数从多到少；只是推测的标「推定」；
+  field / refurb = 这个根因在现场 / 翻新记录里各出现几次；category 只能从这里选：{rcs}；
+- solutions：真正解决过问题的措施，意思相同的合并；field / refurb = 在现场 / 翻新时各解决过几次；写明对应哪个根因（for_cause 填根因原文）；
 - detours：排查时试过但没用的动作（下次可以少走的弯路），合并同义的；
 - process：建议的处理顺序，先做解决次数多、操作简单的。
 只输出一个 JSON 对象，不要注释：
 {{"title": "报警/问题描述，一句话",
-  "root_causes": [{{"cause": "根因", "category": "根因分类", "count": 1}}],
-  "solutions": [{{"action": "解决措施（具体）", "count": 1}}],
+  "root_causes": [{{"cause": "根因", "category": "根因分类", "field": 1, "refurb": 0}}],
+  "solutions": [{{"action": "解决措施（具体）", "for_cause": "对应的根因", "field": 1, "refurb": 0}}],
   "detours": ["试过无效的动作"],
   "process": ["第一步…", "第二步…"]}}
 记录：
@@ -342,12 +358,22 @@ def consolidate(c, eid: int):
         return
     lines = []
     for i, x in enumerate(cases[:25], 1):
-        lines.append(f"{i}. [{x['reg_date'] or '日期不明'}｜{x['status']}] 描述：{x['description']}｜代码：{x['error_code'] or '—'}"
+        lines.append(f"{i}. 【{x['exp_type'] or exp_type_of(x['src_doc'])}】[{x['reg_date'] or '日期不明'}｜{x['status']}] 描述：{x['description']}｜代码：{x['error_code'] or '—'}"
                      f"｜排查过程：{x['process'] or '—'}｜解决措施：{x['solution'] or '（未解决）'}"
                      f"｜Root cause：{x['root_cause'] or '待查'}（{x['rc_category'] or '待查'}）｜备件：{x['parts'] or '—'}")
     d = _parse_json(_llm(CONSOLIDATE_PROMPT.format(
         machine=e["machine"], unit=e["unit"], code=f"（故障代码 {e['error_code']}）" if e["error_code"] else "",
         n=len(cases), rcs="、".join(RC_CATEGORIES), cases="\n".join(lines))), kind="dict") or {}
+    for lst in (d.get("root_causes") or [], d.get("solutions") or []):
+        for it in lst:
+            if isinstance(it, dict):
+                it["field"], it["refurb"] = int(it.get("field") or 0), int(it.get("refurb") or 0)
+                it["count"] = it["field"] + it["refurb"] or int(it.get("count") or 1)
+    mix = {}
+    for x in cases:
+        t = x["exp_type"] or exp_type_of(x["src_doc"])
+        mix[t] = mix.get(t, 0) + 1
+    meta["exp_mix"] = "·".join(f"{k}{v}" for k, v in sorted(mix.items()))
     meta.update(title=d.get("title") or e["title"],
                 root_causes=json.dumps(d.get("root_causes") or [], ensure_ascii=False),
                 solutions=json.dumps(d.get("solutions") or [], ensure_ascii=False),
@@ -504,6 +530,63 @@ def related(eid: int, user=None, admin=False) -> list:
     return out
 
 
+def alarm_view(e: dict, rel: list, md: bool = True) -> str:
+    """同一个报警的统一视图：Root cause（全部列出，标来源）+ 处理动作（原厂推荐 / 现场有效 / 翻新有效）+ 少走弯路。
+    e 为条目（现场或原厂），rel 为同机型同错误码的另一来源条目。"""
+    allx = [e] + list(rel)
+    oem = [x for x in allx if (x.get("origin") or "field") == "oem"]
+    fld = [x for x in allx if (x.get("origin") or "field") != "oem"]
+    b = (lambda t: f"**{t}**") if md else (lambda t: t)
+    out = []
+    occ = sum(int(x.get("occ_count") or 0) for x in fld)
+    mix = "、".join(x.get("exp_mix") or "" for x in fld if x.get("exp_mix"))
+    out.append(f"{e['machine']}｜{e['unit']}｜故障代码：{e['error_code'] or '—'}　"
+               + (f"现场+翻新共记录 {occ} 次（{mix}）" if fld else "现场 / 翻新还没有记录")
+               + ("　＋原厂 Guide" if oem else ""))
+    # Root cause
+    rc_lines = []
+    for o in oem:
+        for cz in json.loads(o.get("oem_detail") or "[]"):
+            rc_lines.append(f"【原厂·频度第{cz.get('rate')}】{cz.get('cause')}")
+    for f in fld:
+        for r in json.loads(f.get("root_causes") or "[]"):
+            fc, rf = int(r.get("field") or 0), int(r.get("refurb") or 0)
+            tag = "".join(t for t in (f"【现场 {fc} 次】" if fc else "", f"【翻新 {rf} 次】" if rf else "")) \
+                or f"【记录 {r.get('count', 1)} 次】"
+            rc_lines.append(f"{tag}{r.get('cause')}" + (f"（{r.get('category')}）" if r.get("category") else ""))
+    out.append("")
+    out.append(b(f"Root cause（共 {len(rc_lines)} 个）"))
+    out += [f"{i}. {t}" for i, t in enumerate(rc_lines, 1)] or ["- 待查"]
+    # 处理动作
+    out.append("")
+    out.append(b("处理动作"))
+    if oem:
+        out.append(b("▸ 原厂推荐（Nikon Troubleshooting Guide）"))
+        for o in oem:
+            for cz in json.loads(o.get("oem_detail") or "[]"):
+                for st in cz.get("steps", []):
+                    out.append(f"- [针对原因{cz.get('rate')}] {st.get('check') or '—'}"
+                               + (f"：{st['details'][:200]}" if st.get("details") else ""))
+            if not json.loads(o.get("oem_detail") or "[]"):
+                out.append("- Guide 只列了错误名称，没有写对策")
+    for kind, key in (("现场验证有效", "field"), ("翻新验证有效", "refurb")):
+        acts = [a for f in fld for a in json.loads(f.get("solutions") or "[]") if int(a.get(key) or 0) > 0]
+        if acts:
+            out.append(b(f"▸ {kind}"))
+            out += [f"- {a.get('action')}（解决 {a.get(key)} 次" + (f"；针对：{a['for_cause']}" if a.get("for_cause") else "") + "）"
+                    for a in sorted(acts, key=lambda a: -int(a.get(key) or 0))]
+    legacy = [a for f in fld for a in json.loads(f.get("solutions") or "[]")
+              if not int(a.get("field") or 0) and not int(a.get("refurb") or 0) and a.get("action")]
+    if legacy:
+        out.append(b("▸ 有效措施（来源未区分）"))
+        out += [f"- {a.get('action')}（解决 {a.get('count', 1)} 次）" for a in legacy]
+    dets = [d for f in fld for d in json.loads(f.get("detours") or "[]")]
+    if dets:
+        out.append(b("▸ 少走弯路（试过但没用）"))
+        out += [f"- {d}" for d in dets]
+    return "\n".join(out)
+
+
 # ── 5. 查询 / 可见性 / 编辑（网页和智能体用）────────────────────────────
 def _visible(user, e, admin: bool, conn=None) -> bool:
     from src import acl
@@ -643,24 +726,15 @@ def lookup_for_agent(query: str, user, want_models=None, k: int = 4) -> str:
     if not hits:
         return (f"Troubleshooting 表里没有 {'、'.join(shown)} 的已确认条目。") if shown \
             else "Troubleshooting 表里没有已确认的相关条目。"
-    out = []
-    for _, e in hits[:k]:
-        rcs = json.loads(e["root_causes"] or "[]")
-        sols = json.loads(e["solutions"] or "[]")
-        dets = json.loads(e["detours"] or "[]")
-        occ = [d for d in json.loads(e["occ_dates"] or "[]") if d]
-        if (e["origin"] or "field") == "oem":
-            det = json.loads(e["oem_detail"] or "[]")
-            out.append(f"【原厂 Troubleshooting Guide｜{e['machine']}｜{e['unit']}｜{e['error_code'] or '无代码'}】{e['title']}{e.get('_why', '')}\n"
-                       + "\n".join(f"  原因{cz.get('rate')}（按发生频度）：{cz.get('cause')}\n"
-                                   + "\n".join(f"    → {st.get('check')}" + (f"：{st.get('details')[:160]}" if st.get('details') else "")
-                                               for st in cz.get("steps", [])[:4]) for cz in det[:4])
-                       + f"\n  （来源：{e['src']}）")
+    out, seen = [], set()
+    for _, e in hits:
+        gk = (e["machine"], e["match_key"]) if e["match_key"] else ("id", e["id"])
+        if gk in seen:
             continue
-        out.append(
-            f"【Troubleshooting 表｜{e['machine']}｜{e['unit']}｜{e['error_code'] or '无代码'}】{e['title']}{e.get('_why', '')}"
-            f"（现场发生 {e['occ_count']} 次{('：' + '、'.join(occ[:6])) if occ else ''}）\n"
-            + "  Root cause：" + ("；".join(f"{x.get('cause')}（{x.get('category', '')}，{x.get('count', 1)}次）" for x in rcs[:5]) or "待查") + "\n"
-            + "  解决措施：" + ("；".join(f"{x.get('action')}（解决 {x.get('count', 1)} 次）" for x in sols[:5]) or "暂无") + "\n"
-            + ("  试过无效（少走弯路）：" + "；".join(dets[:5]) if dets else ""))
-    return "\n".join(out)
+        seen.add(gk)
+        rel = related(e["id"], user, False)
+        head = "Troubleshooting 表" if (e["origin"] or "field") != "oem" else "原厂 Troubleshooting Guide"
+        out.append(f"【{head}】{e['title']}{e.get('_why', '')}\n" + alarm_view(e, rel, md=False))
+        if len(out) >= k:
+            break
+    return "\n\n".join(out)
