@@ -470,9 +470,9 @@ def do_get_fts_paths():
     return pd.DataFrame(paths)
 
 
-_VIEWS = ["chat", "kb", "worklog", "err", "admin"]
+_VIEWS = ["chat", "kb", "worklog", "err", "ts", "admin"]
 # 与 _VIEWS 对齐的导航图标类（切视图时要一并带上，否则 elem_classes 覆盖会丢图标）
-_NAV_ICONS = ["nk-ic-chat", "nk-ic-kb", "nk-ic-log", "nk-ic-err", "nk-ic-audit"]
+_NAV_ICONS = ["nk-ic-chat", "nk-ic-kb", "nk-ic-log", "nk-ic-err", "nk-ic-ts", "nk-ic-audit"]
 
 
 def _is_admin_user(request) -> bool:
@@ -611,6 +611,132 @@ def adm_preview(uid, request: gr.Request = None):
         return "先选一个账号。", pd.DataFrame(), pd.DataFrame()
     summary, vis, hid = acl_admin.preview(uid)
     return summary, pd.DataFrame(vis), pd.DataFrame(hid)
+
+
+# ── Troubleshooting 表 ──────────────────────────────────────────────
+def _ts_user(request):
+    from src import acl
+    try:
+        return _resolve_login_user(request)
+    except acl.PermissionDenied:
+        return None
+
+
+def _ts_lines(items, fmt):
+    return "\n".join(fmt(x) for x in items)
+
+
+def ts_query(machine, unit, status, kw, request: gr.Request = None):
+    from src import ts_table, acl
+    admin = _is_admin_user(request)
+    user = _ts_user(request)
+    if acl.security_enabled() and user is None:
+        return "⛔ 未登录。", pd.DataFrame(), gr.update(choices=[], value=None)
+    rows = ts_table.search(user, admin=admin, machine=machine or "", unit=unit or "",
+                           status=(status or "") if admin else "confirmed", keyword=kw or "")
+    st_label = {"pending": "待确认", "confirmed": "已确认", "rejected": "已驳回"}
+    table = []
+    for e in rows:
+        sols = json.loads(e["solutions"] or "[]")
+        rcs = json.loads(e["root_causes"] or "[]")
+        table.append({"编号": e["id"], "机型": e["machine"], "Unit": e["unit"], "故障代码": e["error_code"] or "—",
+                      "报警/问题描述": e["title"], "发生次数": e["occ_count"],
+                      "主要根因": rcs[0].get("cause", "") if rcs else "待查",
+                      "最有效措施": sols[0].get("action", "") if sols else "（未解决）",
+                      "最近": e["last_date"] or "—",
+                      **({"状态": st_label.get(e["status"], e["status"]) + (" · 有新案例" if e["has_new"] else "")} if admin else {})})
+    df = pd.DataFrame(table)
+    if not admin and len(df):
+        for col in ("报警/问题描述", "主要根因", "最有效措施"):
+            df[col] = df[col].astype(str).map(_mask)
+    picks = [(f"#{e['id']} {e['machine']}｜{e['unit']}｜{e['error_code'] or ''} {e['title'][:30]}", e["id"]) for e in rows]
+    return f"共 **{len(rows)}** 个条目。下拉选一个看详情。", df, gr.update(choices=picks, value=None)
+
+
+def ts_detail(eid, request: gr.Request = None):
+    """详情 markdown + 管理员编辑表单的值。"""
+    from src import ts_table, acl
+    empty = ["", "", "", "", "", "", "", "", ""]
+    if not eid:
+        return ["选一个条目查看详情。"] + empty
+    admin = _is_admin_user(request)
+    user = _ts_user(request)
+    d = ts_table.entry_detail(int(eid), user, admin)
+    if not d:
+        return ["⛔ 没有这个条目的查看权限。"] + empty
+    e, cases = d["entry"], d["cases"]
+    rcs = json.loads(e["root_causes"] or "[]"); sols = json.loads(e["solutions"] or "[]")
+    dets = json.loads(e["detours"] or "[]"); proc = json.loads(e["follow_up"] or "[]")
+    parts = json.loads(e["parts"] or "[]"); occ = [x for x in json.loads(e["occ_dates"] or "[]") if x]
+    md = [f"### #{e['id']} {e['title']}",
+          f"**{e['machine']}｜{e['unit']}｜故障代码：{e['error_code'] or '—'}**　发生 **{e['occ_count']}** 次"
+          + (f"（{'、'.join(occ)}）" if occ else "") + (f"　未关闭 {e['open_count']} 次" if e["open_count"] else ""),
+          "", "**Root cause**（按出现次数）"]
+    md += [f"{i}. {x.get('cause')}　`{x.get('category', '')}` × {x.get('count', 1)}" for i, x in enumerate(rcs, 1)] or ["- 待查"]
+    md += ["", "**解决措施**（真正解决过问题的）"]
+    md += [f"{i}. {x.get('action')}　✅ 解决 {x.get('count', 1)} 次" for i, x in enumerate(sols, 1)] or ["- 还没有解决过"]
+    if dets:
+        md += ["", "**少走弯路**（试过但没用的）"] + [f"- {x}" for x in dets]
+    if proc:
+        md += ["", "**建议处理顺序**"] + [f"{i}. {x}" for i, x in enumerate(proc, 1)]
+    if parts:
+        md += ["", "**更换过的备件**：" + "、".join(parts)]
+    refs = json.loads(e["oem_refs"] or "[]")
+    if refs and (admin or acl.can_see(user, "oem_manual", e["machine"])):
+        md += ["", "**原厂对策**"] + [f"> 《{r['doc']}》{r['section']}：{r['text'][:300]}" for r in refs]
+    if e["notes"]:
+        md += ["", f"**备注**：{e['notes']}"]
+    md += ["", f"**现场记录（{len(cases)} 条）**", "", "| 日期 | 描述 | 排查过程 | 解决措施 | Root cause | 状态 | 来源 |", "|---|---|---|---|---|---|---|"]
+    for x in cases:
+        ds = json.loads(x["dates"] or "[]")
+        when = (ds[0] + (f" 等 {len(ds)} 天" if len(ds) > 1 else "")) if ds else (x["reg_date"] or "—")
+        cell = lambda v: (v or "—").replace("|", "／").replace("\n", " ")[:160]
+        md.append(f"| {when} | {cell(x['description'])} | {cell(x['process'])} | {cell(x['solution'])} | "
+                  f"{cell(x['root_cause'])}（{x['rc_category'] or '待查'}） | {x['status']} | {cell(x['src_doc'])} {x['case_no'] or ''} |")
+    text = "\n".join(md)
+    if not admin:
+        text = _mask(text)
+    form = [e["title"], e["unit"], e["error_code"] or "",
+            _ts_lines(rcs, lambda x: f"{x.get('cause')}｜{x.get('category', '')}｜{x.get('count', 1)}"),
+            _ts_lines(sols, lambda x: f"{x.get('action')}｜{x.get('count', 1)}"),
+            "\n".join(dets), "\n".join(proc), e["notes"] or "", e["status"]]
+    return [text] + form
+
+
+def ts_save(eid, title, unit, code, rcs, sols, dets, proc, notes, status, request: gr.Request = None):
+    from src import ts_table
+    if not _is_admin_user(request):
+        return _ADMIN_ONLY
+    if not eid:
+        return "⚠️ 先选一个条目。"
+
+    def rows(text, keys):
+        out = []
+        for ln in (text or "").splitlines():
+            parts = [p.strip() for p in ln.split("｜")]
+            if not parts[0]:
+                continue
+            d = {}
+            for i, k in enumerate(keys):
+                v = parts[i] if i < len(parts) else ""
+                d[k] = int(v) if k == "count" and v.isdigit() else (1 if k == "count" else v)
+            out.append(d)
+        return json.dumps(out, ensure_ascii=False)
+    lines = lambda t: json.dumps([x.strip() for x in (t or "").splitlines() if x.strip()], ensure_ascii=False)
+    return ts_table.save_entry(_admin_uid(request), int(eid), title=title, unit=unit, error_code=code,
+                               root_causes=rows(rcs, ["cause", "category", "count"]),
+                               solutions=rows(sols, ["action", "count"]), detours=lines(dets),
+                               follow_up=lines(proc), notes=notes, status=status)
+
+
+def ts_run_extract(request: gr.Request = None):
+    if not _is_admin_user(request):
+        return _ADMIN_ONLY
+    import subprocess
+    r = subprocess.run(["systemctl", "start", "--no-block", "nikon-ts-extract.service"], capture_output=True, text=True)
+    _track(request, "启动 Troubleshooting 抽取")
+    return ("✅ 已在后台开始抽取新资料（只处理新增/改过的内容），几分钟到几十分钟，完成后点「查询」刷新。"
+            if r.returncode == 0 else f"⚠️ 启动失败：{(r.stderr or r.stdout).strip()[:200]}")
 
 
 def do_admin_report(request: gr.Request = None):
@@ -977,6 +1103,7 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
         nav_kb    = gr.Button("知识库", elem_classes=["nk-navbtn", "nk-ic-kb"])
         nav_log   = gr.Button("工作日志", elem_classes=["nk-navbtn", "nk-ic-log"])
         nav_err   = gr.Button("错误码速查", elem_classes=["nk-navbtn", "nk-ic-err"])
+        nav_ts    = gr.Button("Troubleshooting 表", elem_classes=["nk-navbtn", "nk-ic-ts"])
         nav_admin = gr.Button("审计", elem_classes=["nk-navbtn", "nk-ic-audit"], visible=False)
         gr.HTML(_SIDE_RECENT)
         gr.HTML(_account_html())
@@ -1077,6 +1204,38 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
             err_btn = gr.Button("查询", variant="primary", scale=2)
         err_out = gr.Markdown("")
 
+    # ── 视图：Troubleshooting 表 ──
+    with gr.Column(visible=False) as view_ts:
+        gr.HTML('<div class="nk-view" style="margin-bottom:0;"><h2>Troubleshooting 表</h2>'
+                '<div class="nk-view-sub">从故障履历 / 工作日志 / 客户报告里积累的「解过的 trouble」· 按机型 → Unit 分类 · 现场验证过的根因和有效措施</div></div>')
+        with gr.Row():
+            ts_f_machine = gr.Dropdown(label="机型", choices=[("全部", ""), "S207D", "S206D", "S308F", "SF100"], value="")
+            ts_f_unit = gr.Dropdown(label="Unit", choices=[("全部", "")] + __import__("src.ts_table", fromlist=["UNITS"]).UNITS, value="")
+            ts_f_status = gr.Dropdown(label="状态（管理员）", choices=[("全部", ""), ("待确认", "pending"), ("已确认", "confirmed"),
+                                                                ("有新案例", "has_new"), ("已驳回", "rejected")], value="")
+            ts_f_kw = gr.Textbox(label="关键词 / 故障代码")
+        ts_btn = gr.Button("查询", variant="primary")
+        ts_msg = gr.Markdown("")
+        ts_df = gr.Dataframe(interactive=False, wrap=True, max_height=420)
+        ts_pick = gr.Dropdown(label="查看条目", choices=[])
+        ts_md = gr.Markdown("")
+        with gr.Accordion("✏️ 编辑 / 确认（管理员）", open=False):
+            ts_e_title = gr.Textbox(label="报警/问题描述")
+            with gr.Row():
+                ts_e_unit = gr.Dropdown(label="Unit", choices=__import__("src.ts_table", fromlist=["UNITS"]).UNITS)
+                ts_e_code = gr.Textbox(label="故障代码")
+                ts_e_status = gr.Dropdown(label="状态", choices=[("待确认", "pending"), ("已确认（生效）", "confirmed"),
+                                                               ("已驳回", "rejected")])
+            ts_e_rcs = gr.Textbox(label="Root cause（每行一条：根因｜根因分类｜次数）", lines=3)
+            ts_e_sols = gr.Textbox(label="解决措施（每行一条：措施｜解决次数）", lines=3)
+            ts_e_dets = gr.Textbox(label="少走弯路（每行一条：试过没用的动作）", lines=2)
+            ts_e_proc = gr.Textbox(label="建议处理顺序（每行一步）", lines=3)
+            ts_e_notes = gr.Textbox(label="备注", lines=1)
+            with gr.Row():
+                ts_save_btn = gr.Button("保存", variant="primary")
+                ts_extract_btn = gr.Button("立即抽取新资料")
+            ts_e_msg = gr.Markdown("")
+
     # ── 视图：审计（仅管理员，导航按钮默认隐藏，登录后由 _reveal_admin 放出）──
     with gr.Column(visible=False) as view_admin:
         gr.HTML('<div class="nk-view" style="margin-bottom:0;"><h2>🛡 权限管理</h2>'
@@ -1141,13 +1300,22 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
                                          interactive=False, wrap=True)
 
     # ── 事件绑定 ──
-    _views = [view_chat, view_kb, view_log, view_err, view_admin]
-    _navs = [nav_chat, nav_kb, nav_log, nav_err, nav_admin]
+    _views = [view_chat, view_kb, view_log, view_err, view_ts, view_admin]
+    _navs = [nav_chat, nav_kb, nav_log, nav_err, nav_ts, nav_admin]
     _nav_out = _views + _navs
     nav_chat.click(lambda: _switch_view("chat"), None, _nav_out)
     nav_kb.click(lambda: _switch_view("kb"), None, _nav_out)
     nav_log.click(lambda: _switch_view("worklog"), None, _nav_out)
     nav_err.click(lambda: _switch_view("err"), None, _nav_out)
+    _ts_filters = [ts_f_machine, ts_f_unit, ts_f_status, ts_f_kw]
+    nav_ts.click(lambda: _switch_view("ts"), None, _nav_out).then(ts_query, _ts_filters, [ts_msg, ts_df, ts_pick])
+    ts_btn.click(ts_query, _ts_filters, [ts_msg, ts_df, ts_pick])
+    ts_f_kw.submit(ts_query, _ts_filters, [ts_msg, ts_df, ts_pick])
+    ts_pick.change(ts_detail, [ts_pick], [ts_md, ts_e_title, ts_e_unit, ts_e_code, ts_e_rcs, ts_e_sols,
+                                          ts_e_dets, ts_e_proc, ts_e_notes, ts_e_status])
+    ts_save_btn.click(ts_save, [ts_pick, ts_e_title, ts_e_unit, ts_e_code, ts_e_rcs, ts_e_sols, ts_e_dets,
+                                ts_e_proc, ts_e_notes, ts_e_status], [ts_e_msg])
+    ts_extract_btn.click(ts_run_extract, None, [ts_e_msg])
     nav_admin.click(lambda: _switch_view("admin"), None, _nav_out).then(
         do_admin_report, None, [admin_status, admin_perms, admin_log]).then(
         adm_users, None, [adm_users_df, adm_pick])

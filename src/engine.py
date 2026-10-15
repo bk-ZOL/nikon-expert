@@ -671,6 +671,7 @@ def _build_context(merged_results: list, mode: str = "qa") -> tuple:
 
 
 _TOOL_LABELS = {
+    "troubleshooting_lookup": "查 Troubleshooting 表",
     "error_code_lookup": "查错误码",
     "keyword_search": "关键词搜资料",
     "semantic_search": "按意思搜资料",

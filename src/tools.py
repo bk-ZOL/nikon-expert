@@ -240,6 +240,15 @@ def build_tools(collector: SourceCollector, retriever=None, question: str = "", 
             return _format(results, empty=f"未检索到与「{query}」语义相关的内容。")
         return _memo("semantic_search", query, run)
 
+    def troubleshooting_lookup(query: str) -> str:
+        """查 Troubleshooting 表：现场处理过、已确认的故障经验（根因、真正有效的解决措施、发生次数、少走的弯路）。
+        遇到报警 / 故障时**先用本工具**，比翻手册更贴近现场；再用 error_code_lookup / fault_history_lookup 补充。
+        参数 query: 故障代码或现象关键词（如「STG-B8-E0」「CT 轴无法升起」「FFU 停止」）。"""
+        def run():
+            from src import acl, ts_table
+            return ts_table.lookup_for_agent(query, acl.get_current_user(), want_models=want or None)
+        return _memo("troubleshooting_lookup", query, run)
+
     def fault_history_lookup(query: str) -> str:
         """在厂内故障履历中查历史相似案例（曾经怎么处理、换了什么、结果如何）。
         定位根因或想找处置先例时使用。
@@ -297,7 +306,7 @@ def build_tools(collector: SourceCollector, retriever=None, question: str = "", 
                 acl.reset_current_user(tok)
         return wrapped
 
-    fns = [error_code_lookup, keyword_search, semantic_search, fault_history_lookup,
+    fns = [troubleshooting_lookup, error_code_lookup, keyword_search, semantic_search, fault_history_lookup,
            inspect_diagram, trace_connection, netlist_trace]
     if not _vision_available():
         fns.remove(inspect_diagram)   # 看图模型连不上时不给智能体，免得每次白白失败一步

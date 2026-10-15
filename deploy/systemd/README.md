@@ -12,3 +12,10 @@ systemctl daemon-reload && systemctl enable --now nikon-circuit-recognize.timer
 配套：服务器 `.env` 里要有 `CIRCUIT_OCR=0`（电路图入库时只取文字层，OCR 交给这个任务；否则同步会被大图册拖过 1 小时时限）。
 
 其他服务（nikon-expert、nikon-mcp、nikon-wps-sync、nikon-feishu-refresh）的配置目前只在服务器上，见 CLAUDE.md 第 1 节。
+
+## nikon-ts-extract（Troubleshooting 表，2026-10-15）
+
+每天北京 04:30（UTC 20:30）从故障履历 / 工作日志 / 客户报告里抽取新案例、归并成条目；网页「Troubleshooting 表」页管理员也能点「立即抽取新资料」手动触发。
+
+    cp deploy/systemd/nikon-ts-extract.* /etc/systemd/system/
+    systemctl daemon-reload && systemctl enable --now nikon-ts-extract.timer
