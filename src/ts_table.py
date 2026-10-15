@@ -613,14 +613,14 @@ def lookup_for_agent(query: str, user, want_models=None, k: int = 4) -> str:
     for ctrl, main, det in parse(q):
         txt = code_lookup(f"{ctrl}-{main}-{det}" if det else f"{ctrl}-{main}") or ""
         m = re.search(r"#[0-9A-F]{2}H[^）)]*[）)]：\s*(.+?)(?:\(|（|\n|$)", txt)
-        if m and len(m.group(1).strip()) >= 8:
-            names.append(re.sub(r"\s+", " ", m.group(1).strip().lower())[:28])
+        if m and len(_norm_text(m.group(1))) >= 8:
+            names.append(_norm_text(m.group(1))[:10])     # 去空格标点比前 10 个字：容忍「No return FP (WT) response」这种插字
     hits = []
     for e in search(user, admin=False, status="confirmed", want_models=want_models):
         score, why = 0, ""
         ec = _code_key(e["error_code"])
         hay = " ".join(str(e[f] or "") for f in ("title", "root_causes", "solutions", "error_code", "unit")).lower()
-        hay1 = re.sub(r"\s+", " ", hay)
+        hay1 = _norm_text(hay)
         if e["match_key"] and e["match_key"] in mkeys:
             score, why = 12, ""
         elif ec and any(cd in ec or ec in cd for cd in codes if len(cd) >= 4):
@@ -635,8 +635,11 @@ def lookup_for_agent(query: str, user, want_models=None, k: int = 4) -> str:
             e = dict(e); e["_why"] = why
             hits.append((score, e))
     hits.sort(key=lambda x: (-x[0], -(x[1]["occ_count"] or 0)))
+    if any(sc >= 8 for sc, _ in hits):                 # 有同码 / 同报警名称的，就不列同主码参考
+        hits = [(sc, e) for sc, e in hits if sc >= 8]
+    shown = sorted(k for k in mkeys if "-" in k)
     if not hits:
-        return ("Troubleshooting 表里没有这个代码（" + "、".join(sorted(mkeys)) + "）的已确认条目。") if mkeys \
+        return (f"Troubleshooting 表里没有 {'、'.join(shown)} 的已确认条目。") if shown \
             else "Troubleshooting 表里没有已确认的相关条目。"
     out = []
     for _, e in hits[:k]:
