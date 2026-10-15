@@ -48,7 +48,7 @@ def classify(doc_name: str, doc_type: str) -> dict:
     """返回 {sec_level, owner_scope, review_status, source_class}。判不出→兜底不可见。"""
     name = doc_name or ""
 
-    if doc_type == "circuit_diagram" or OEM_NAME_PAT.search(name):
+    if doc_type in ("circuit_diagram", "error_code") or OEM_NAME_PAT.search(name):
         return _row(3, "vendor:nikon", "approved", "oem_manual")
     if any(k in name for k in ("技术应答表", "应答表", "报价", "承诺", "应答")):
         return _row(4, "internal", "pending", "commercial")
@@ -143,6 +143,10 @@ def apply_doc_acl(doc_name: str) -> bool:
         rows = conn.execute(
             "SELECT doc_id, doc_type FROM doc_meta WHERE doc_name = ?", (doc_name,)
         ).fetchall()
+        if not rows:   # 有的入库管线（如错误码原文）只写全文索引、不写 doc_meta
+            rows = conn.execute(
+                "SELECT DISTINCT doc_id, doc_type FROM doc_fts WHERE doc_name = ?", (doc_name,)
+            ).fetchall()
         if not rows:
             conn.close()
             return False

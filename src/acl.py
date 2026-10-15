@@ -55,10 +55,46 @@ CATEGORIES = {
     "other": "其他/未分类",
 }
 MODELS = ["S207D", "S206D", "S308F", "SF100"]   # 机型族；资料不限机型时记 ALL
-ALL_MODELS = "ALL"
+ALL_MODELS = "ALL"        # 资料：不分机型的通用资料；账号：model:ALL = 所有机型 + 通用资料都能看
+COMMON_GRANT = "COMMON"   # 账号：model:COMMON = 能看通用资料（按机型隔离的账号可以不给）
 NO_CUSTOMER = "none"                            # 不属于任何客户的资料
 _LEGACY_INTERNAL_CATS = {"sop", "fault_history", "worklog", "commercial", "other"}
 _LEGACY_VENDOR_CATS = {"oem_manual", "circuit"}
+
+
+def _model_tokens(models) -> list:
+    """账号的机型授权 → 资料 models 字段里要匹配的值（COMMON 对应资料的 ALL）。"""
+    toks = sorted(m for m in models if m not in (ALL_MODELS, COMMON_GRANT))
+    if COMMON_GRANT in models:
+        toks.append(ALL_MODELS)
+    return toks
+
+
+def models_ok(user_models, doc_models) -> bool:
+    """机型维度判定。账号 ALL = 全放行；资料 ALL（通用）要求账号有 COMMON；否则机型要有交集。"""
+    if ALL_MODELS in user_models:
+        return True
+    doc_models = set(doc_models or [ALL_MODELS])
+    if ALL_MODELS in doc_models:
+        return COMMON_GRANT in user_models
+    return bool(doc_models & set(user_models))
+
+
+def can_see(user, category: str, model: str = None) -> bool:
+    """非检索类工具（线表、错误码换算等）用：这个账号能不能看某类别 / 某机型的资料。"""
+    if not security_enabled():
+        return True
+    user = _resolve(user)
+    if user is None:
+        return False
+    if user.is_superuser:
+        return True
+    if user.is_auditor:
+        return False
+    cats, models, _ = user.grants
+    if category not in cats:
+        return False
+    return model is None or models_ok(models, [model])
 
 
 def customers() -> dict:
@@ -177,8 +213,7 @@ def visible(user: Optional[User], doc: dict) -> bool:
     cats, models, custs = user.grants
     if category not in cats:
         return False  # 类别维度
-    doc_models = set(doc.get("models") or [ALL_MODELS])
-    if ALL_MODELS not in models and ALL_MODELS not in doc_models and not (doc_models & models):
+    if not models_ok(models, doc.get("models") or [ALL_MODELS]):
         return False  # 机型维度
     customer = doc.get("customer") or NO_CUSTOMER
     if customer != NO_CUSTOMER and customer not in custs:
@@ -217,7 +252,7 @@ def build_qdrant_filter(user: Optional[User]):
         FieldCondition(key="customer", match=MatchAny(any=sorted(custs) + [NO_CUSTOMER])),
     ]
     if ALL_MODELS not in models:
-        must.append(FieldCondition(key="models", match=MatchAny(any=sorted(models) + [ALL_MODELS])))
+        must.append(FieldCondition(key="models", match=MatchAny(any=_model_tokens(models) or ["__none__"])))
     return Filter(must=must)
 
 
@@ -243,9 +278,9 @@ def fts_acl_clause(user: Optional[User]) -> tuple:
     custs = sorted(custs) + [NO_CUSTOMER]
     model_sql, model_params = "", []
     if ALL_MODELS not in models:
-        likes = " OR ".join("a.models LIKE ?" for _ in range(len(models) + 1))
-        model_sql = f" AND ({likes})"
-        model_params = [f"%,{m},%" for m in sorted(models) + [ALL_MODELS]]
+        toks = _model_tokens(models) or ["__none__"]
+        model_sql = " AND (" + " OR ".join("a.models LIKE ?" for _ in toks) + ")"
+        model_params = [f"%,{m},%" for m in toks]
     clause = f"""
         AND doc_fts.doc_id IN (
             SELECT a.doc_id FROM doc_acl a

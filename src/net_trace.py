@@ -33,7 +33,11 @@ def _pages_text(doc_name: str, pdf_path: str) -> dict:
     从全文索引读（含入库时 OCR 补出的竖排编号）；索引里一页都没有才直接读这份 PDF 的文字层。"""
     db = os.getenv("FTS_DB_PATH", "./data/fts.db")
     fam = _family(doc_name)
-    key = (fam, doc_name if fam == doc_name else "", os.path.getmtime(db) if os.path.exists(db) else 0)
+    from src import acl
+    acl_sql, acl_params = acl.fts_acl_clause(None)   # 按当前账号的权限过滤（机型隔离）
+    # 缓存 key 带上权限条件：不同账号能看的图册不同，不能共用一份缓存
+    key = (fam, doc_name if fam == doc_name else "", os.path.getmtime(db) if os.path.exists(db) else 0,
+           tuple(acl_params))
     if key in _text_cache:
         return _text_cache[key]
     pages = {}
@@ -45,7 +49,8 @@ def _pages_text(doc_name: str, pdf_path: str) -> dict:
                 import sqlite3 as sq
             con = sq.connect(db)
             for name, title, text in con.execute(
-                    "select doc_name, section_title, text from doc_fts where doc_type='circuit_diagram'"):
+                    "select doc_name, section_title, text from doc_fts where doc_type='circuit_diagram'" + acl_sql,
+                    acl_params):
                 if name != doc_name and _family(name) != fam:
                     continue
                 m = re.search(r"(\d+)", title or "")

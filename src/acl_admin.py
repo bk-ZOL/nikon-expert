@@ -43,9 +43,12 @@ def _now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _fmt_models(models) -> str:
+def _fmt_models(models, for_doc=False) -> str:
+    """账号：ALL=全部（含通用），COMMON=通用资料；资料：ALL=通用（不分机型）。"""
     m = [x for x in models if x]
-    return "全部" if (not m or acl.ALL_MODELS in m) else "、".join(m)
+    if not m or acl.ALL_MODELS in m:
+        return "通用（不分机型）" if for_doc else "全部机型 + 通用"
+    return "、".join("通用资料" if x == acl.COMMON_GRANT else x for x in m)
 
 
 # ── 账号 ──────────────────────────────────────────────────────────────
@@ -105,7 +108,9 @@ def save_user(admin: str, uid: str, display_name: str, role: str, clearance: int
         until = datetime.now() + timedelta(days=365 * 3)
     until_iso = until.strftime("%Y-%m-%dT23:59:59Z")
     models = [m for m in (models or [])]
-    if not models or acl.ALL_MODELS in models:
+    if not models:
+        return "⚠️ 机型至少勾一项（不限机型就勾「全部机型 + 通用资料」）。"
+    if acl.ALL_MODELS in models:
         models = [acl.ALL_MODELS]
     scopes = sorted({f"cat:{x}" for x in (cats or []) if x in acl.CATEGORIES}
                     | {f"model:{m}" for m in models}
@@ -162,7 +167,7 @@ def list_docs(category="", model="", customer="", review="", keyword="") -> list
         models = [m for m in (r["models"] or ",ALL,").split(",") if m]
         if category and r["category"] != category:
             continue
-        if model and model not in models and acl.ALL_MODELS not in models:
+        if model and model not in models:          # 选「通用」时 model=ALL，只列不分机型的资料
             continue
         if customer and (r["customer"] or "none") != customer:
             continue
@@ -180,7 +185,7 @@ def docs_table(rows: list) -> list:
     return [{
         "文件名": r["filename"],
         "类别": acl.CATEGORIES.get(r["category"], r["category"] or "（未分类）"),
-        "机型": _fmt_models([m for m in (r["models"] or "").split(",") if m]),
+        "机型": _fmt_models([m for m in (r["models"] or "").split(",") if m], for_doc=True),
         "客户": cust_names.get(r["customer"], "—") if (r["customer"] or "none") != "none" else "—",
         "密级": f"L{r['sec_level']}",
         "状态": REVIEW_LABELS.get(r["review_status"], r["review_status"]),
@@ -259,8 +264,8 @@ def preview(uid: str) -> tuple:
             reason.append(f"密级 L{r['sec_level']} 高于 L{user.clearance}")
         if r["category"] not in cats:
             reason.append(f"无「{acl.CATEGORIES.get(r['category'], r['category'])}」类别权限")
-        if acl.ALL_MODELS not in models and acl.ALL_MODELS not in ms and not (set(ms) & set(models)):
-            reason.append(f"无 {'/'.join(ms)} 机型权限")
+        if not acl.models_ok(models, ms):
+            reason.append("无通用资料权限" if acl.ALL_MODELS in ms else f"无 {'/'.join(ms)} 机型权限")
         if (r["customer"] or "none") != "none" and r["customer"] not in custs:
             reason.append("无该客户权限")
         (hid if reason else vis).append((r, "；".join(reason)))
@@ -274,3 +279,9 @@ def preview(uid: str) -> tuple:
     vis_rows = docs_table([r for r, _ in vis])
     hid_rows = [{**t, "看不到的原因": why} for t, (r, why) in zip(docs_table([r for r, _ in hid]), hid)]
     return summary, vis_rows, hid_rows
+
+
+def visible_names(uid: str) -> set:
+    """这个账号能看到的资料文件名（知识库页按此过滤列表）。"""
+    _, vis, _ = preview(uid)
+    return {r["文件名"] for r in vis}

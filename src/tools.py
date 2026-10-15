@@ -170,8 +170,11 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
         当故障描述中出现明确的报警码 / error code 时，优先用本工具。
         参数 code: 报警码字符串。"""
         def run():
+            from src import acl
             from src.error_code import lookup as _conv
-            conv = _conv(code)
+            # 换算读的是 207 的错误信息原文（data/kwiki_mirror/5.Error code），没有对应权限就不给
+            conv = _conv(code) if acl.can_see(None, "oem_manual", "S207D") else ""
+
             results = search_fts_exact(code.strip(), limit=6)
             collector.add(results, tool="error_code_lookup")
             found = _format(results, empty=f"知识库中未找到 {code} 的记录。")
@@ -257,6 +260,9 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
         问题里有接插件号（J7554A、P1394A）或线缆号（4S095-884）时优先用本工具；查不到再用 trace_connection。
         参数 query: 一个接插件号、线缆号或设备/基板名（如「J7544B」「4S095-884」「Robot Controller」）。"""
         def run():
+            from src import acl
+            if not acl.can_see(None, "circuit", "S207D"):   # 线表只有 S207D 的（data/netlist.db）
+                return "（当前账号没有 S207D 电路图的查看权限，无法追线。）"
             from src.netlist_trace import trace as _trace
             return _trace(query, max_hops=2, max_lines=40)
         return _memo("netlist_trace", query, run)

@@ -42,8 +42,16 @@ CASES = [
         _doc(3, "oem_manual", models=("S207D",)), False),
     ("机型限 S308F：S308F 资料可见", _user(3, ("cat:oem_manual", "model:S308F")),
         _doc(3, "oem_manual", models=("S308F",)), True),
-    ("机型限 S308F：通用资料(ALL)可见", _user(3, ("cat:oem_manual", "model:S308F")),
+    ("机型限 S308F：通用资料(ALL)默认看不到", _user(3, ("cat:oem_manual", "model:S308F")),
+        _doc(3, "oem_manual", models=("ALL",)), False),
+    ("机型限 S308F + 通用：通用资料可见", _user(3, ("cat:oem_manual", "model:S308F", "model:COMMON")),
         _doc(3, "oem_manual", models=("ALL",)), True),
+    ("机型限 S207D：S206D/S207D 共用资料可见", _user(3, ("cat:sop", "model:S207D")),
+        _doc(3, "sop", models=("S206D", "S207D")), True),
+    ("机型限 S207D：S308F 资料挡", _user(3, ("cat:sop", "model:S207D", "model:COMMON")),
+        _doc(3, "sop", models=("S308F",)), False),
+    ("全部机型账号：通用资料可见", _user(3, ("cat:sop", "model:ALL")),
+        _doc(3, "sop", models=("ALL",)), True),
     ("机型限 S308F：多机型资料含 S308F 可见", _user(3, ("cat:sop", "model:S308F")),
         _doc(3, "sop", models=("S207D", "S308F")), True),
     ("没勾客户：客户的故障履历挡", _user(4, ("cat:fault_history",), role="manager"),
@@ -94,7 +102,19 @@ def test_fts_clause_shape():
     assert params[0] == 3 and "oem_manual" in params and "none" in params
     assert "a.models LIKE" not in sql            # 不限机型时不加机型条件
     sql2, params2 = fts_acl_clause(_user(3, ("cat:sop", "model:S308F")))
-    assert "a.models LIKE" in sql2 and "%,S308F,%" in params2 and "%,ALL,%" in params2
+    assert "a.models LIKE" in sql2 and "%,S308F,%" in params2 and "%,ALL,%" not in params2   # 没给通用资料
+
+
+def test_can_see_tools():
+    u = _user(3, ("cat:circuit", "model:S308F"))
+    assert acl.can_see(u, "circuit", "S308F") and not acl.can_see(u, "circuit", "S207D")
+    assert not acl.can_see(u, "oem_manual")
+    assert acl.can_see(_user(3, ("vendor:nikon",)), "circuit", "S207D")   # 旧格式 = 全部机型
+
+
+def test_fts_clause_common_only():
+    sql, params = fts_acl_clause(_user(3, ("cat:sop", "model:COMMON")))
+    assert params[-1] == "%,ALL,%" and "%,S207D,%" not in params
 
 
 def test_parse_grants_legacy_and_new():

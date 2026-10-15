@@ -299,7 +299,9 @@ _PROVIDER_CHOICES = [label for _id, label in _list_providers()]
 _LABEL2ID = {label: pid for pid, label in _list_providers()}
 
 
-def do_switch_provider(provider_label: str):
+def do_switch_provider(provider_label: str, request: gr.Request = None):
+    if not _is_admin_user(request):
+        return gr.update(), _ADMIN_ONLY
     """切换 provider：刷新可选模型下拉。不立即切换 LLM，选好模型点按钮才切。"""
     pid = _LABEL2ID.get(provider_label)
     if not pid:
@@ -318,8 +320,10 @@ def do_switch_provider(provider_label: str):
     return gr.update(choices=models, value=models[0] if models else None), tip
 
 
-def do_apply_model(provider_label: str, model_name: str):
+def do_apply_model(provider_label: str, model_name: str, request: gr.Request = None):
     """真正切换 Settings.llm 到所选 provider + 模型。"""
+    if not _is_admin_user(request):
+        return _ADMIN_ONLY
     pid = _LABEL2ID.get(provider_label)
     if not pid:
         return "⚠️ 请选择大脑"
@@ -341,7 +345,28 @@ def do_ingest_file(file_path):
     return str(result)
 
 
-def do_get_kb_docs():
+_ADMIN_ONLY = "⛔ 只有管理员能做这个操作。"
+
+
+def _kb_filter(df, request):
+    """知识库列表：管理员看全部；其他账号只列自己有权限的资料（文件名本身也可能是敏感信息）。"""
+    try:
+        from src import acl
+        if not acl.security_enabled() or _is_admin_user(request) or df is None or len(df) == 0:
+            return df
+        from src import acl_admin
+        names = acl_admin.visible_names(_admin_uid(request))
+        col = "文档名" if "文档名" in df.columns else df.columns[1]
+        return df[df[col].astype(str).str.replace("🆕", "").str.strip().isin(names)].reset_index(drop=True)
+    except Exception:
+        return df.iloc[0:0]
+
+
+def do_get_kb_docs(request: gr.Request = None):
+    return _kb_filter(_kb_docs_all(), request)
+
+
+def _kb_docs_all():
     docs = backend.get_kb_documents()
     if not docs:
         return pd.DataFrame(columns=["选择", "文档名", "类型", "位置", "Chunks"])
@@ -376,9 +401,11 @@ def do_get_kb_docs():
     return df
 
 
-def do_delete_selected(df_data):
+def do_delete_selected(df_data, request: gr.Request = None):
+    if not _is_admin_user(request):
+        return _ADMIN_ONLY, do_get_kb_docs(request)
     if df_data is None or len(df_data) == 0:
-        return "⚠️ 列表为空", do_get_kb_docs()
+        return "⚠️ 列表为空", do_get_kb_docs(request)
     df = df_data if isinstance(df_data, pd.DataFrame) else pd.DataFrame(df_data)
     selected = [(n[len("🆕"):].strip() if str(n).startswith("🆕") else n)
                 for n in df[df["选择"] == True]["文档名"].tolist()]
@@ -387,10 +414,13 @@ def do_delete_selected(df_data):
     for name in selected:
         backend.delete_document(name)
     preview = "、".join(selected[:3]) + ("..." if len(selected) > 3 else "")
-    return f"✅ 已删除 {len(selected)} 个文档：{preview}", do_get_kb_docs()
+    _track(request, f"删除文档 {len(selected)} 份")
+    return f"✅ 已删除 {len(selected)} 个文档：{preview}", do_get_kb_docs(request)
 
 
-def do_fts_index(dir_path: str, pattern: str):
+def do_fts_index(dir_path: str, pattern: str, request: gr.Request = None):
+    if not _is_admin_user(request):
+        return _ADMIN_ONLY
     if not dir_path or not dir_path.strip():
         return "⚠️ 请先选择目录"
     dir_path = dir_path.strip()
@@ -407,7 +437,9 @@ def do_fts_index(dir_path: str, pattern: str):
     return str(result)
 
 
-def do_okf_import(path: str):
+def do_okf_import(path: str, request: gr.Request = None):
+    if not _is_admin_user(request):
+        return _ADMIN_ONLY
     if not path or not path.strip():
         return "⚠️ 请填写 OKF 目录或 .md 文件路径"
     path = path.strip()
@@ -422,7 +454,10 @@ def do_okf_import(path: str):
     return str(result)
 
 
-def do_fts_clear():
+def do_fts_clear(request: gr.Request = None):
+    if not _is_admin_user(request):
+        return _ADMIN_ONLY
+    _track(request, "清空全文索引")
     result = backend.fts_clear()
     count = result.get("cleared", 0) if isinstance(result, dict) else 0
     return f"✅ 已清空全文索引（{count} 条记录）"
@@ -476,8 +511,16 @@ def _choices_cat():
 
 
 def _choices_model():
+    """账号授权用：全部（不限）/ 各机型 / 通用资料。"""
     from src import acl
-    return [("全部机型（不限）", acl.ALL_MODELS)] + [(m, m) for m in acl.MODELS]
+    return ([("全部机型 + 通用资料（不限）", acl.ALL_MODELS)] + [(m, m) for m in acl.MODELS]
+            + [("通用资料（光刻原理等不分机型的）", acl.COMMON_GRANT)])
+
+
+def _choices_doc_model():
+    """资料打标签用：通用（不分机型）/ 各机型。"""
+    from src import acl
+    return [("通用（不分机型）", acl.ALL_MODELS)] + [(m, m) for m in acl.MODELS]
 
 
 def _choices_cust():
@@ -506,7 +549,7 @@ def adm_pick_user(uid, request: gr.Request = None):
     if not uid or uid == _NEW_USER:
         import datetime as _dt
         return [gr.update(value="", interactive=True), "", "engineer", 3,
-                ["sop", "fault_history", "worklog", "oem_manual"], ["ALL"], [],
+                ["sop", "fault_history", "worklog", "oem_manual"], ["S207D", "COMMON"], [],
                 (_dt.date.today() + _dt.timedelta(days=365 * 3)).isoformat(), "active", ""]
     u = acl_admin.get_user(uid)
     if not u:
@@ -615,6 +658,8 @@ def do_ingest_files(paths, mode="☁️ 云端 API", request: gr.Request = None)
       🖥 服务器本地 → INGEST_EMBED=local（用服务器自带 BGE-M3，文本不出服务器，较慢）
     任务面板实时进度条，完成自动置顶进文档表。"""
     from src import ingest_queue
+    if not _is_admin_user(request):
+        return _ADMIN_ONLY, _jobs_html()
     _track(request, "上传")
     if not paths:
         return "⚠️ 请先选择文件", _jobs_html()
@@ -698,12 +743,12 @@ def _jobs_html():
     return head + f'<div class="nk-view" style="margin:0;">{"".join(rows)}</div>'
 
 
-def _tick_jobs():
+def _tick_jobs(request: gr.Request = None):
     """定时轮询：刷新任务面板；有任务刚完成则同时刷新文档表。"""
     from src import ingest_queue
     html = _jobs_html()
     if ingest_queue.take_dirty():
-        return html, do_get_kb_docs()
+        return html, do_get_kb_docs(request)
     return html, gr.update()
 
 
@@ -739,7 +784,14 @@ def do_error_lookup(code, request: gr.Request = None):
     return "\n".join(out)
 
 
-def do_worklog_recent(days):
+def do_worklog_recent(days, request: gr.Request = None):
+    from src import acl
+    try:
+        _u = _resolve_login_user(request)
+    except acl.PermissionDenied:
+        _u = None
+    if acl.security_enabled() and not acl.can_see(_u, "worklog"):
+        return "⛔ 当前账号没有「工作日志」的查看权限。"
     try:
         days = max(1, int(days or 7))
     except Exception:
@@ -1043,7 +1095,8 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
                     adm_ustatus = gr.Dropdown(label="状态", choices=[("启用", "active"), ("停用", "suspended"),
                                                                    ("离职", "left")], value="active", scale=1)
                 adm_cats = gr.CheckboxGroup(label="可看的资料类别", choices=_choices_cat())
-                adm_models = gr.CheckboxGroup(label="可看的机型（勾「全部机型」= 不限）", choices=_choices_model())
+                adm_models = gr.CheckboxGroup(label="可看的机型（按机型隔离：只勾该机型；要看光刻原理这类通用资料再勾「通用资料」）",
+                                              choices=_choices_model())
                 adm_custs = gr.CheckboxGroup(label="可看的客户资料（不勾 = 看不到任何客户的资料）", choices=_choices_cust())
                 adm_pw = gr.Textbox(label="新密码（新建必填；修改时留空 = 不改）", type="password")
                 adm_user_save = gr.Button("保存账号", variant="primary")
@@ -1051,7 +1104,7 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
             with gr.Tab("资料权限"):
                 with gr.Row():
                     adm_f_cat = gr.Dropdown(label="类别", choices=[("全部", "")] + _choices_cat(), value="")
-                    adm_f_model = gr.Dropdown(label="机型", choices=[("全部", "")] + [(m, m) for m in ["S207D", "S206D", "S308F", "SF100"]], value="")
+                    adm_f_model = gr.Dropdown(label="机型", choices=[("全部", "")] + _choices_doc_model(), value="")
                     adm_f_cust = gr.Dropdown(label="客户", choices=[("全部", ""), ("非客户资料", "none")] + _choices_cust(), value="")
                     adm_f_review = gr.Dropdown(label="审核状态", choices=[("全部", ""), ("已审核", "approved"),
                                                                     ("待审核", "pending"), ("已驳回", "rejected")], value="")
@@ -1069,7 +1122,7 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
                     adm_n_review = gr.Dropdown(label="改审核状态为", choices=[_KEEP, ("已审核（放行）", "approved"),
                                                                        ("待审核（隐藏）", "pending"), ("已驳回（隐藏）", "rejected")], value=_KEEP)
                 adm_keep_models = gr.Checkbox(label="机型不改", value=True)
-                adm_n_models = gr.CheckboxGroup(label="改机型为（取消上面「机型不改」才生效）", choices=_choices_model())
+                adm_n_models = gr.CheckboxGroup(label="改机型为（取消上面「机型不改」才生效）", choices=_choices_doc_model())
                 adm_docs_apply = gr.Button("应用修改", variant="primary")
             with gr.Tab("权限预览"):
                 with gr.Row():
