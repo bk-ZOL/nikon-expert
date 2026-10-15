@@ -1025,7 +1025,7 @@ def _maintop_html():
         model = os.getenv("LLM_MODEL", "")
     return (f'<div id="nk-maintop" style="display:flex;justify-content:space-between;'
             f'align-items:center;padding:14px 4px 4px;">'
-            f'<span class="nk-tagline">光刻机设备知识库 · 按权限可见</span>'
+            f'<span class="nk-tagline">光刻机设备知识库</span>'
             f'<span class="nk-status" style="font-family:var(--nk-mono);font-size:.68rem;'
             f'color:var(--nk-ink-faint);display:inline-flex;align-items:center;gap:6px;">'
             f'<span class="dot" style="width:6px;height:6px;border-radius:50%;'
@@ -1515,7 +1515,7 @@ if __name__ == "__main__":
             except Exception:
                 return False
         launch_kwargs["auth"] = _multi_user_auth
-        launch_kwargs["auth_message"] = "Nikon Expert — 请用个人账号登录（资料按权限可见）"
+        launch_kwargs["auth_message"] = "Nikon Expert — 请用个人账号登录"
         print("🔐 登录模式：per-user（users 表校验，ACL 生效）")
     else:
         _auth = os.getenv("GRADIO_AUTH", "")   # 形如 user:pass

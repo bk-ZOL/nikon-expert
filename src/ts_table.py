@@ -710,7 +710,9 @@ def lookup_for_agent(query: str, user, want_models=None, k: int = 4) -> str:
             score, why = 12, ""
         elif ec and any(cd in ec or ec in cd for cd in codes if len(cd) >= 4):
             score, why = 10, ""
-        elif names and any(all(w in hay_words for w in ws) for ws in names):
+        elif names and (e["origin"] or "field") != "oem" and not re.match(r"^[0-9A-F]{2}-", e["match_key"] or "") \
+                and any(all(w in hay_words for w in ws) for ws in names):
+            # 按报警名称只配「现场只抄了报警文字、没记数字代码」的记录；原厂 / 有数字码的条目各有准确代码
             score, why = 8, "（同报警名称，现场当时没记数字代码）"
         elif mains and e["match_key"][:2] in mains and re.match(r"^[0-9A-F]{2}-", e["match_key"] or ""):
             score, why = 3, f"（同主码 {e['match_key'][:2]}，仅供参考）"
