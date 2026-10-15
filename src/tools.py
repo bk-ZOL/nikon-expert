@@ -131,11 +131,24 @@ def _format(results: list, empty: str, max_chars: int = 500) -> str:
 
 
 # ── 工具工厂 ────────────────────────────────────────────────────
-def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool]:
+def build_tools(collector: SourceCollector, retriever=None, question: str = "", history=None) -> List[FunctionTool]:
     """构造一批绑定到本次 collector 的 FunctionTool。
 
     retriever: 语义检索器（engine 的 VectorIndexRetriever）。为空则语义工具降级为关键词搜索。
     """
+    # 问题（或追问时上一句）点名了机型 → 各检索工具只留该机型 / 通用的资料（2026-10-15：问 207 混进 308 手册）
+    from src.machine_model import models_in_query, matches_query_models
+    want = models_in_query(question or "")
+    if not want:
+        from src.agent import history_text
+        for m in reversed(history or []):
+            if m.get("role") == "user":
+                want = models_in_query(history_text(m.get("content")))
+                break
+
+    def _by_model(results):
+        return [r for r in results if matches_query_models(r.get("machine_model", ""), want)] if want else results
+
     from src.fulltext import search_fts, search_fts_exact
 
     # 本次运行的工具调用记忆：同一 (工具,参数) 只真正执行一次，
@@ -175,7 +188,7 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
             # 换算读的是 207 的错误信息原文（data/kwiki_mirror/5.Error code），没有对应权限就不给
             conv = _conv(code) if acl.can_see(None, "oem_manual", "S207D") else ""
 
-            results = search_fts_exact(code.strip(), limit=6)
+            results = _by_model(search_fts_exact(code.strip(), limit=12))[:6]
             collector.add(results, tool="error_code_lookup")
             found = _format(results, empty=f"知识库中未找到 {code} 的记录。")
             return (f"{conv}\n\n【知识库里提到 {code.strip()} 的记录（履历/日志等）】\n{found}") if conv else found
@@ -186,7 +199,7 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
         适合查具体部件名、参数名、操作步骤等确定性关键词。
         参数 query: 空格分隔的关键词。"""
         def run():
-            results = search_fts(query.strip(), limit=6)
+            results = _by_model(search_fts(query.strip(), limit=12))[:6]
             collector.add(results, tool="keyword_search")
             return _format(results, empty=f"未搜索到与「{query}」相关的内容。")
         return _memo("keyword_search", query, run)
@@ -219,8 +232,10 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
                     "section_title": m.get("section_title", ""),
                     "page_start": m.get("page_start", ""),
                     "file_path": m.get("file_path", ""),
+                    "machine_model": m.get("machine_model", ""),
                     "text": n.get_content(),
                 })
+            results = _by_model(results)
             collector.add(results, tool="semantic_search")
             return _format(results, empty=f"未检索到与「{query}」语义相关的内容。")
         return _memo("semantic_search", query, run)
@@ -230,7 +245,7 @@ def build_tools(collector: SourceCollector, retriever=None) -> List[FunctionTool
         定位根因或想找处置先例时使用。
         参数 query: 故障现象或报警码关键词。"""
         def run():
-            results = search_fts(query.strip(), doc_type="fault_history", limit=6)
+            results = _by_model(search_fts(query.strip(), doc_type="fault_history", limit=12))[:6]
             collector.add(results, tool="fault_history_lookup")
             return _format(results, empty=f"故障履历中未找到与「{query}」相似的案例。")
         return _memo("fault_history_lookup", query, run)

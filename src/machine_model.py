@@ -81,6 +81,16 @@ def models_in_query(query: str) -> list:
     return _families(query, LOOSE)
 
 
+def matches_query_models(tags: str, want: list) -> bool:
+    """问题点名了机型（want 非空）时，资料是否属于这些机型（通用 / 没标签的也算）。没点名一律 True。"""
+    if not want:
+        return True
+    fams = normalize(tags)
+    if not fams or "COMMON" in fams:
+        return True
+    return any(f in want for f in fams)
+
+
 def model_factor(tags: str, query: str = "") -> float:
     fams = normalize(tags)
     if not fams or "COMMON" in fams:

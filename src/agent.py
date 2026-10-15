@@ -221,7 +221,7 @@ async def _agent_events(question: str, history=None):
 
     eng = _init_engine()
     collector = SourceCollector()
-    tools = build_tools(collector, retriever=eng.get("retriever"))
+    tools = build_tools(collector, retriever=eng.get("retriever"), question=question, history=history)
 
     agent = ReActAgent(
         tools=tools,

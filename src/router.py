@@ -346,11 +346,14 @@ def _merge_results_raw(
 
 def merge_results(fts_results, semantic_results, fts_weight=0.5, semantic_weight=0.5,
                   top_n=6, query="", **kw):
-    """RRF 融合后按机型加权：问题点名机型优先，否则自家机型优先。只降权、不过滤。"""
+    """RRF 融合后按机型处理：问题点名了机型 → 只留该机型（及通用）的资料；没点名 → 自家机型优先（只降权）。"""
     pool = _merge_results_raw(fts_results, semantic_results, fts_weight, semantic_weight,
                               top_n=max(top_n * 3, top_n + 10), **kw)
     try:
-        from src.machine_model import model_factor
+        from src.machine_model import model_factor, models_in_query, matches_query_models
+        want = models_in_query(query)
+        if want:   # 2026-10-15：问 207 时引用里混进 308 的资料 → 点名机型就过滤，不只是降权
+            pool = [r for r in pool if matches_query_models(r.get("machine_model", ""), want)]
         for r in pool:
             r["score"] = r.get("score", 0) * model_factor(r.get("machine_model", ""), query)
         pool.sort(key=lambda r: r.get("score", 0), reverse=True)
