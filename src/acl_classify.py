@@ -24,7 +24,9 @@ OEM_NAME_PAT = re.compile(
     r"(Technical Information|Maintenance Guide|SM_UsersManual|レチクル設計|Reticle Design"
     r"|^EA\d|^SD\d-EXX4|^LC[-/]|^A0-EXX4|-ELCIRC-|-ELSMIF|^HFE-|^INL-|^PPD-|^RCBR-"
     r"|MCSV .*(Function|Manual)|FOUNDATION|Nikon NSR|Constants and Programs Backup"
-    r"|技术规格书)",
+    r"|技术规格书"
+    # S308F（X6 平台）原厂资料：检查表、修理手册、要因分析（2026-10-15）
+    r"|S308F-|(?<![A-Z0-9])(?:AR|EX)?-?X6(?![0-9])|チェックシート|ﾁｪｯｸｼｰﾄ|REPAIR MANUAL|修理マニュアル|トラブル要因)",
     re.IGNORECASE,
 )
 OEM_TEXT_MARK = re.compile(r"NIKON CORPORATION|CONFIDENTIAL|S\d{3}E-RF-", re.IGNORECASE)

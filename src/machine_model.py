@@ -4,6 +4,7 @@
   S206D 族：S205C / S206D / S305B / S306C / S306D
   S207D 族：S207D / S307E
   SF100 族：SF100 ~ SF140 / SF200
+  S308F 族：S308F（X6 平台：AR-X6 / EX-X6）——2026-10-15 加
 通用文档可带多个标签，逗号分隔，如 "S206D,S207D"。
 环境变量：
   DEFAULT_MACHINE_MODEL  无法推断时的默认标签（S207D）
@@ -18,15 +19,17 @@ STRICT = [
     ("S206D", re.compile(r"S20[56][CD]|S30[56][BCD]", re.I)),
     ("S207D", re.compile(r"S207D|S307E", re.I)),
     ("SF100", re.compile(r"SF1[0-4]0|SF200", re.I)),
+    ("S308F", re.compile(r"S308F|(?<![A-Z0-9])(?:AR|EX)-?X6(?![0-9])|(?<![A-Z0-9])X6(?![0-9])", re.I)),
 ]
 # 用户提问用的宽松规则（"207""206 的""S307" 这类说法）
 LOOSE = [
     ("S206D", re.compile(r"(?<![0-9A-Z])(?:NSR-?)?S?20[56][CD]?(?![0-9])|(?<![0-9A-Z])S?30[56][BCD]?(?![0-9])", re.I)),
     ("S207D", re.compile(r"(?<![0-9A-Z])(?:NSR-?)?S?207D?(?![0-9])|(?<![0-9A-Z])S?307E?(?![0-9])", re.I)),
     ("SF100", re.compile(r"SF\s?1[0-4]0|SF\s?200", re.I)),
+    ("S308F", re.compile(r"(?<![0-9A-Z])(?:NSR-?)?S?308F?(?![0-9])|(?<![A-Z0-9])(?:AR|EX)?-?X6(?![0-9])", re.I)),
 ]
-DIR_FAMILY = {"206": "S206D", "207": "S207D", "307": "S207D", "SF100": "SF100"}
-ORDER = ["COMMON", "S207D", "S206D", "SF100"]          # 标签排列顺序
+DIR_FAMILY = {"206": "S206D", "207": "S207D", "307": "S207D", "SF100": "SF100", "308": "S308F"}
+ORDER = ["COMMON", "S207D", "S206D", "SF100", "S308F"]          # 标签排列顺序
 
 
 def _common_dirs():
@@ -100,9 +103,10 @@ CONTENT = [
     ("S206D", re.compile(r"(?<![0-9A-Z])(?:NSR-?)?(?:S20[56][CD]|S30[56][BCD])(?![0-9])", re.I)),
     ("S207D", re.compile(r"(?<![0-9A-Z])(?:NSR-?)?(?:S207D|S307E)(?![0-9])", re.I)),
     ("SF100", re.compile(r"(?<![0-9A-Z])(?:NSR-?)?(?:SF1[0-4]0|SF200)(?![0-9])", re.I)),
+    ("S308F", re.compile(r"(?<![0-9A-Z])(?:NSR-?)?S308F(?![0-9])|(?<![A-Z0-9])(?:AR|EX)-?X6(?![0-9])", re.I)),
 ]
 # Nikon 文档编号，如 S307E-RF-ELCIRC-R10、S206D-SM-…：编号里的机型就是这份资料的机型
-DOC_NO = re.compile(r"(?<![0-9A-Z])((?:S20[567][CD]|S30[567][BCDE]|SF1[0-4]0|SF200))-[A-Z]{2,}-", re.I)
+DOC_NO = re.compile(r"(?<![0-9A-Z])((?:S20[567][CD]|S30[567][BCDE]|S308F|SF1[0-4]0|SF200))-[A-Z]{2,}-", re.I)
 COVER_CHARS = 3000          # Word/Excel/文本：开头这么多字算"封面"
 BODY_CHARS = 200_000        # 正文抽样上限
 BODY_PAGES = 40             # PDF 正文最多均匀抽这么多页
