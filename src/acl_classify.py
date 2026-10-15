@@ -9,7 +9,11 @@ apply_doc_acl(doc_name)：摄入完成后调用——按文档名定级写 doc_a
 """
 import os
 import re
-import sqlite3
+
+try:
+    import pysqlite3 as sqlite3   # 系统自带 sqlite 没有 trigram 分词器，读 doc_fts 会报错
+except ImportError:
+    import sqlite3
 
 # 客户词典：文件名/路径命中 → 归属域
 CUSTOMER_DICT = [
