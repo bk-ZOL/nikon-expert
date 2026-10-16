@@ -1,0 +1,13 @@
+[Unit]
+Description=Nikon Expert 飞书知识库增量同步（工作日志 / SOP / 知识整理）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/nikon-expert
+Environment=PYTHONUNBUFFERED=1
+# WPS 同步在跑时本轮跳过：两边都写全文索引 / 向量库，不同时写（AlmaLinux 8 的 systemd 239 没有 ExecCondition）
+ExecStart=/bin/sh -c 'if systemctl is-active --quiet nikon-wps-sync.service; then echo "WPS 同步正在跑，本轮跳过"; exit 0; fi; exec /opt/nikon-expert/.venv/bin/python /opt/nikon-expert/scripts/sync_feishu.py'
+TimeoutStartSec=3600
+Nice=10

@@ -1005,25 +1005,28 @@ def do_worklog_recent(days, request: gr.Request = None):
         load_dotenv(os.path.join(os.path.dirname(_sp), ".feishu_env"), override=False)
     except Exception:
         pass
-    url = os.getenv("FEISHU_WORKLOG_URL", "").strip()
-    if not url:
-        return "未配置 FEISHU_WORKLOG_URL。"
     try:
         import feishu_client
         from src.util_timeout import call_with_timeout
+        if not feishu_client.worklog_urls():
+            return "未配置 FEISHU_WORKLOG_URL。"
         _TIMEOUT = object()
-        wl = call_with_timeout(lambda: feishu_client.fetch_worklog(url), 60, on_timeout=_TIMEOUT)
-        if wl is _TIMEOUT:
-            return "⏱️ 读取飞书日志超时（>60s），可能网络或 token 问题，请稍后重试。"
+        wls = call_with_timeout(lambda: feishu_client.fetch_worklogs(), 90, on_timeout=_TIMEOUT)
+        if wls is _TIMEOUT:
+            return "⏱️ 读取飞书日志超时（>90s），可能网络或 token 问题，请稍后重试。"
     except Exception as e:
         return f"读取飞书日志失败：{e}\n（若 token 过期，请在本机重跑 feishu_auth.py login）"
-    ds = wl.get("days") or []
-    if not ds:
-        return "飞书日志没解析出按日期的日报。"
-    sel = ds[:days]
-    head = (f"**{wl.get('title') or '飞书工作日志'}** · 最近 {len(sel)} 天\n\n"
-            f"可用范围 {ds[-1]['date']} … {ds[0]['date']}")
-    return head + "\n\n---\n\n" + "\n\n---\n\n".join(d["text"] for d in sel)
+    out = []
+    for wl in wls:                         # 每个现场一篇履历（星钥、鹏城…），都列出来
+        ds = wl.get("days") or []
+        title = wl.get("title") or "飞书工作日志"
+        if not ds:
+            out.append(f"**{title}**：没解析出按日期的日报。")
+            continue
+        sel = ds[:days]
+        out.append(f"## {title} · 最近 {len(sel)} 天\n\n可用范围 {ds[-1]['date']} … {ds[0]['date']}"
+                   + "\n\n---\n\n" + "\n\n---\n\n".join(d["text"] for d in sel))
+    return "\n\n".join(out) if out else "飞书知识库里没找到工作日志。"
 
 
 # ══════════════════════════════════════════════════════════════════

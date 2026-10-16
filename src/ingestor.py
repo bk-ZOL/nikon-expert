@@ -609,6 +609,34 @@ def ingest_pdf_dir(pdf_dir: str = None, machine_model: str = "") -> int:
 # ─────────────────────────────────────────────────────────────
 # 3. Excel Checksheet（保持现有逻辑 + 去重 + FTS）
 # ─────────────────────────────────────────────────────────────
+def ocr_image_bytes(data: bytes, suffix: str = ".png") -> str:
+    """一张截图做 OCR，只留像样的行；整张认不出 30 个字（实物照片）返回空。
+    小于 20KB 的图（图标、logo）不认。OFFICE_IMAGE_OCR=0 或没装 tesseract 时返回空。"""
+    import re as _re, shutil, subprocess, tempfile
+    if os.getenv("OFFICE_IMAGE_OCR", "1").lower() in ("0", "false", "no") or not shutil.which("tesseract"):
+        return ""
+    if len(data or b"") < 20 * 1024:
+        return ""
+    langs = os.getenv("OFFICE_IMAGE_OCR_LANGS", "eng+chi_sim")
+    good = _re.compile(r"[A-Za-z0-9\u4e00-\u9fff]")
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / f"img{suffix or '.png'}"
+        f.write_bytes(data)
+        try:
+            txt = subprocess.run(["tesseract", str(f), "-", "-l", langs, "--psm", "3"],
+                                 capture_output=True, text=True, timeout=180).stdout
+        except Exception:
+            return ""
+    lines = []
+    for line in txt.splitlines():
+        line = " ".join(line.split())
+        g = len(good.findall(line))
+        if g >= 3 and g / max(len(line.replace(" ", "")), 1) >= 0.5:
+            lines.append(line)
+    text = "\n".join(lines)
+    return text if len(good.findall(text)) >= 30 else ""
+
+
 def office_image_ocr(path, existing_chars: int = 0) -> list:
     """Excel/Word 里贴的截图做 OCR，返回 [(段标题, 文字)]。
 
@@ -630,27 +658,11 @@ def office_image_ocr(path, existing_chars: int = 0) -> list:
             and z.getinfo(n).file_size >= 20 * 1024]
     key = lambda n: [int(t) if t.isdigit() else t for t in _re.split(r"(\d+)", n)]
     imgs.sort(key=key)
-    langs = os.getenv("OFFICE_IMAGE_OCR_LANGS", "eng+chi_sim")
-    good = _re.compile(r"[A-Za-z0-9\u4e00-\u9fff]")
     out = []
-    with tempfile.TemporaryDirectory() as td:
-        for k, n in enumerate(imgs, 1):
-            f = Path(td) / f"i{k}{Path(n).suffix}"
-            f.write_bytes(z.read(n))
-            try:
-                txt = subprocess.run(["tesseract", str(f), "-", "-l", langs, "--psm", "3"],
-                                     capture_output=True, text=True, timeout=180).stdout
-            except Exception:
-                continue
-            lines = []
-            for line in txt.splitlines():
-                line = " ".join(line.split())
-                g = len(good.findall(line))
-                if g >= 3 and g / max(len(line.replace(" ", "")), 1) >= 0.5:
-                    lines.append(line)
-            text = "\n".join(lines)
-            if len(good.findall(text)) >= 30:
-                out.append((f"截图文字 图{k}", text))
+    for k, n in enumerate(imgs, 1):
+        text = ocr_image_bytes(z.read(n), Path(n).suffix)
+        if text:
+            out.append((f"截图文字 图{k}", text))
     if imgs:
         print(f"  🖼  截图 OCR：{len(imgs)} 张图，{len(out)} 张认出文字")
     return out

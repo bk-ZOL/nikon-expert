@@ -19,3 +19,11 @@ systemctl daemon-reload && systemctl enable --now nikon-circuit-recognize.timer
 
     cp deploy/systemd/nikon-ts-extract.* /etc/systemd/system/
     systemctl daemon-reload && systemctl enable --now nikon-ts-extract.timer
+
+## nikon-feishu-sync（飞书知识库同步，2026-10-16）
+
+每 30 分钟同步整个飞书知识库「NIKON NSR 205/206/207」（`scripts/sync_feishu.py`）：装机履历按天入库，SOP 进 SOP 速查，其余文档、附件按普通资料入库；只重读最后编辑时间变了的文档。WPS 同步正在跑时这一轮跳过。
+
+    cp deploy/systemd/nikon-feishu-sync.* /etc/systemd/system/
+    systemctl daemon-reload && systemctl enable --now nikon-feishu-sync.timer
+    journalctl -u nikon-feishu-sync -n 50     # 看最近一次同步

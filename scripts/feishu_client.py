@@ -113,6 +113,154 @@ def parse_worklog(content: str):
     return days
 
 
+# ── 整个知识库（2026-10-16：从一篇工作日志扩大到整个 wiki 空间）────────────
+def space_of(url_or_token: str) -> str:
+    """wiki 链接所在知识库的 space_id。"""
+    m = _WIKI_RE.search(url_or_token)
+    node = m.group(1) if m else url_or_token.strip()
+    r = requests.get(f"{DOMAIN}/open-apis/wiki/v2/spaces/get_node", params={"token": node},
+                     headers=_headers(), timeout=20).json()
+    if r.get("code"):
+        raise RuntimeError(f"解析 wiki 节点失败：{r.get('code')} {r.get('msg')}")
+    return r["data"]["node"]["space_id"]
+
+
+def list_space(space_id: str, parent: str = None, path: str = "", depth: int = 0, max_depth: int = 8):
+    """深度优先列出知识库全部节点：[{node_token, obj_token, obj_type, title, path, edit_time, url}]。
+    path 是上级标题用「/」连起来（不含自己）。"""
+    out, tok = [], ""
+    while True:
+        p = {"page_size": 50}
+        if parent:
+            p["parent_node_token"] = parent
+        if tok:
+            p["page_token"] = tok
+        r = requests.get(f"{DOMAIN}/open-apis/wiki/v2/spaces/{space_id}/nodes", params=p,
+                         headers=_headers(), timeout=30).json()
+        if r.get("code"):
+            raise RuntimeError(f"列知识库节点失败：{r.get('code')} {r.get('msg')}")
+        for it in r["data"].get("items", []):
+            out.append({"node_token": it["node_token"], "obj_token": it["obj_token"],
+                        "obj_type": it["obj_type"], "title": (it.get("title") or "").strip(),
+                        "path": path, "edit_time": str(it.get("obj_edit_time") or ""),
+                        "url": it.get("url") or ""})
+            if it.get("has_child") and depth < max_depth:
+                sub = f"{path}/{it.get('title', '')}".strip("/")
+                out += list_space(space_id, it["node_token"], sub, depth + 1, max_depth)
+        if not r["data"].get("has_more"):
+            return out
+        tok = r["data"]["page_token"]
+
+
+def read_docx_blocks(doc_id: str) -> list:
+    blocks, tok = [], ""
+    while True:
+        p = {"page_size": 500}
+        if tok:
+            p["page_token"] = tok
+        r = requests.get(f"{DOMAIN}/open-apis/docx/v1/documents/{doc_id}/blocks", params=p,
+                         headers=_headers(), timeout=30).json()
+        if r.get("code"):
+            raise RuntimeError(f"读取文档块失败：{r.get('code')} {r.get('msg')}")
+        blocks += r["data"].get("items", [])
+        if not r["data"].get("has_more"):
+            return blocks
+        tok = r["data"]["page_token"]
+
+
+def download_media(token: str) -> bytes:
+    """文档里的图片 / 附件素材。"""
+    r = requests.get(f"{DOMAIN}/open-apis/drive/v1/medias/{token}/download", headers=_headers(), timeout=60)
+    if r.status_code != 200 or r.headers.get("content-type", "").startswith("application/json"):
+        raise RuntimeError(f"下载素材失败：{r.status_code} {r.text[:200]}")
+    return r.content
+
+
+def download_file(token: str) -> bytes:
+    """知识库里直接上传的文件（obj_type=file）。"""
+    r = requests.get(f"{DOMAIN}/open-apis/drive/v1/files/{token}/download", headers=_headers(), timeout=120)
+    if r.status_code != 200 or r.headers.get("content-type", "").startswith("application/json"):
+        raise RuntimeError(f"下载文件失败：{r.status_code} {r.text[:200]}")
+    return r.content
+
+
+# 块类型：https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/data-structure
+_BLOCK_KEY = {2: "text", 12: "bullet", 13: "ordered", 14: "code", 15: "quote", 17: "todo", 19: "callout"}
+_BLOCK_KEY.update({3 + i: f"heading{i + 1}" for i in range(9)})
+
+
+def _elements_text(body: dict) -> str:
+    parts = []
+    for e in (body or {}).get("elements", []):
+        if "text_run" in e:
+            parts.append(e["text_run"].get("content", ""))
+        elif "mention_doc" in e:
+            parts.append(e["mention_doc"].get("title", ""))
+        elif "equation" in e:
+            parts.append(e["equation"].get("content", ""))
+    return "".join(parts)
+
+
+def blocks_to_markdown(blocks: list, image_text=None) -> str:
+    """文档块 → markdown：标题 → #、列表 → - / 1.、表格单元格逐行。
+    image_text(token) 返回截图里认出的文字（可为空），放回图片原来的位置。"""
+    lines, seq = [], {}
+    for b in blocks:
+        bt = b.get("block_type")
+        if bt == 1:                        # page：文档标题，doc_name 里已经有了
+            continue
+        if bt == 27:
+            tok = (b.get("image") or {}).get("token")
+            txt = image_text(tok) if (image_text and tok) else ""
+            if txt:
+                lines.append("【截图文字】\n" + txt)
+            continue
+        key = _BLOCK_KEY.get(bt)
+        if not key:
+            continue
+        text = _elements_text(b.get(key)).strip()
+        if bt != 13:
+            seq.pop(b.get("parent_id"), None)
+        if not text:
+            continue
+        if key.startswith("heading"):
+            lines.append("#" * min(int(key[7:]), 6) + " " + text)
+        elif bt == 12:
+            lines.append("- " + text)
+        elif bt == 13:                     # 有序列表：飞书不给编号，按同一父块下连续出现的次数数
+            n = seq.get(b.get("parent_id"), 0) + 1
+            seq[b.get("parent_id")] = n
+            lines.append(f"{n}. {text}")
+        elif bt == 17:
+            done = (b.get("todo") or {}).get("style", {}).get("done")
+            lines.append(("- [x] " if done else "- [ ] ") + text)
+        elif bt == 14:
+            lines.append("```\n" + text + "\n```")
+        elif bt == 15:
+            lines.append("> " + text)
+        else:
+            lines.append(text)
+    return "\n\n".join(lines).strip()
+
+
+WORKLOG_TITLE_RE = re.compile(r"履历|日志|日报")
+
+
+def worklog_urls() -> list:
+    """所有工作日志的链接：同步时在知识库里发现的（data/feishu_sync_state.json 的 worklogs），
+    没有的话退回 FEISHU_WORKLOG_URL。"""
+    import json
+    st = Path(__file__).resolve().parent.parent / "data" / "feishu_sync_state.json"
+    try:
+        wl = json.loads(st.read_text()).get("worklogs") or []
+        if wl:
+            return [w["url"] for w in wl if w.get("url")]
+    except Exception:
+        pass
+    url = os.getenv("FEISHU_WORKLOG_URL", "").strip()
+    return [url] if url else []
+
+
 def fetch_worklog(url_or_token: str):
     """高层：链接/节点 -> dict(doc_id, title, wiki_node, content, last_edit, days)。"""
     doc_id, title, node = resolve_url(url_or_token)
@@ -125,6 +273,16 @@ def fetch_worklog(url_or_token: str):
         "last_edit": get_last_edit(doc_id),
         "days": parse_worklog(content),
     }
+
+
+def fetch_worklogs(site: str = ""):
+    """所有工作日志（site 非空时只要标题含它的），每篇一个 fetch_worklog 结果。"""
+    out = []
+    for url in worklog_urls():
+        wl = fetch_worklog(url)
+        if not site or site.lower() in (wl.get("title") or "").lower():
+            out.append(wl)
+    return out
 
 
 if __name__ == "__main__":

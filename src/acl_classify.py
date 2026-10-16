@@ -20,7 +20,7 @@ CUSTOMER_DICT = [
     (("星钥", "苏州星钥", "xingyue"), "customer:xingyue"),
     (("欣奕华", "xinyihua"), "customer:xinyihua"),
     (("长春", "changchun"), "customer:changchun"),
-    (("鹏程", "pcl"), "customer:pcl"),
+    (("鹏程", "鹏城", "pcl"), "customer:pcl"),
     (("8632018",), "customer:8632018"),
 ]
 
