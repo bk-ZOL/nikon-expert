@@ -198,6 +198,16 @@ def _keyword_use_agent(question: str, mode: Optional[str] = None) -> bool:
     return False
 
 
+_PROCEDURE_RE = re.compile(
+    r"步骤|流程|sop|作业指导|操作规程|手順|procedure|how\s*to|"
+    r"(?:怎么|怎样|如何|咋)(?:做|操作|调|设|换|更换|拆|装|安装|清洁|清扫|擦|确认|检查|测|校|标定|恢复|启动|关闭|退出|打开|进入|设置|设定)", re.I)
+
+
+def is_procedure_query(question: str) -> bool:
+    """问操作步骤（怎么调 / 怎么换 / 步骤 / SOP）。"""
+    return bool(_PROCEDURE_RE.search(question or ""))
+
+
 def should_use_agent(question: str, mode: Optional[str] = None) -> bool:
     """判断走多步 Agent 排障还是单次 RAG 快路径。
 
@@ -212,6 +222,8 @@ def should_use_agent(question: str, mode: Optional[str] = None) -> bool:
     if os.getenv("AGENT_ALWAYS", "false").lower() in ("1", "true", "yes"):
         return True
 
+    if is_procedure_query(question):
+        return True                    # 操作步骤要走 procedure_lookup 拿完整流程，快路径只能拿到零散片段
     if os.getenv("AGENT_ROUTER", "semantic").lower() != "keyword":
         sem = _semantic_use_agent(question)
         if sem is not None:

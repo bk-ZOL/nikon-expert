@@ -273,3 +273,41 @@ def nikon_trace(query: str, max_hops: int = 3) -> str:
     """
     from src.netlist_trace import trace
     return trace(query, max_hops=max_hops)
+
+
+@mcp.tool()
+def nikon_search_sop(query: str, machine_model: str = "", limit: int = 3, organize: bool = False) -> str:
+    """Find complete OPERATION PROCEDURES (SOP / 操作步骤) in the manuals, check sheets and
+    in-house SOPs — adjustment, replacement, cleaning, software operation, check work.
+
+    Manuals are indexed by heading, so nikon_search only hits one or two isolated steps;
+    this tool returns the whole procedure in the original order (title → 1. → 2. → …),
+    with source document, chapter and page. Chinese queries find English/Japanese manuals.
+
+    Use for: 「AIS 电压怎么调」「wafer loader 机械手清洁步骤」「怎么查看软件版本」「Reticle alignment SOP」。
+
+    Args:
+        query: the task to perform (any language).
+        machine_model: optional, e.g. S207D / S206D — only that model's (and common) documents.
+        limit: max procedures (default 3).
+        organize: True → also rewrite the first hit as a Chinese step-by-step SOP with the LLM
+                  (original content only, nothing added). Slower (~20-60 s).
+    """
+    _ensure_init()
+    from src import sop_index
+    try:
+        hits = sop_index.search(query, machine_model=machine_model, k=max(1, min(int(limit), 8)))
+    except Exception as e:
+        return f"Error: {e}"
+    if not hits:
+        return f"No procedure found for: {query}"
+    out = [f"Procedures for 「{query}」 — {len(hits)} found", ""]
+    if organize:
+        try:
+            out += ["## 整理后的中文 SOP（第 1 个）", sop_index.organize(hits[0], query), "", "## 原文"]
+        except Exception as e:
+            out.append(f"(organize failed: {e})")
+    for p in hits:
+        out.append(sop_index.format_text(p, detail_chars=500, max_chars=6000))
+        out.append("")
+    return "\n".join(out)

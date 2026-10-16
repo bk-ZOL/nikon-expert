@@ -470,9 +470,9 @@ def do_get_fts_paths():
     return pd.DataFrame(paths)
 
 
-_VIEWS = ["chat", "kb", "worklog", "err", "ts", "admin"]
+_VIEWS = ["chat", "kb", "worklog", "err", "sop", "ts", "admin"]
 # 与 _VIEWS 对齐的导航图标类（切视图时要一并带上，否则 elem_classes 覆盖会丢图标）
-_NAV_ICONS = ["nk-ic-chat", "nk-ic-kb", "nk-ic-log", "nk-ic-err", "nk-ic-ts", "nk-ic-audit"]
+_NAV_ICONS = ["nk-ic-chat", "nk-ic-kb", "nk-ic-log", "nk-ic-err", "nk-ic-sop", "nk-ic-ts", "nk-ic-audit"]
 
 
 def _is_admin_user(request) -> bool:
@@ -920,6 +920,71 @@ def do_error_lookup(code, request: gr.Request = None):
     return "\n".join(out)
 
 
+def _sop_user(request):
+    """SOP 速查用的登录身份；security 开启但没登录 → PermissionDenied。"""
+    return _resolve_login_user(request)
+
+
+def sop_query(q, machine, request: gr.Request = None):
+    from src import acl, sop_index
+    q = (q or "").strip()
+    if not q:
+        return "输入要做的作业，如「AIS 电压调整」「wafer loader 机械手清洁」「查看软件版本」。", gr.update(choices=[], value=None)
+    _track(request, "SOP 速查")
+    try:
+        hits = sop_index.search(q, user=_sop_user(request), machine_model=machine or "", k=10)
+    except acl.PermissionDenied:
+        return "⛔ 未登录或无权限。", gr.update(choices=[], value=None)
+    except Exception as e:
+        return f"查询失败：{e}", gr.update(choices=[], value=None)
+    if not hits:
+        return f"没找到与「{q}」相关的操作流程，换个说法试试（中英日文都行）。", gr.update(choices=[], value=None)
+    lines = [f"找到 **{len(hits)}** 个流程，下拉选一个看完整步骤：\n",
+             "| # | 流程 | 来源 | 步数 | 机型 |", "|---|---|---|---|---|"]
+    picks = []
+    for i, p in enumerate(hits, 1):
+        tag = "自编 SOP" if p["doc_type"] == "sop" else ""
+        src = p["doc_name"] + (f"（另有 {len(set(p['also_in']))} 个版本）" if p["also_in"] else "")
+        cell = lambda x: _mask(str(x)).replace("|", "／")
+        lines.append(f"| {i} | {cell(p['title'][:80])} | {cell(src[:70])}{' · ' + tag if tag else ''} | {p['n_steps']} | {p['machine_model'] or '—'} |")
+        picks.append((f"{i}. {p['title'][:60]} — {p['doc_name'][:40]}", p["id"]))
+    return "\n".join(lines), gr.update(choices=picks, value=picks[0][1])
+
+
+def sop_detail(pid, request: gr.Request = None):
+    from src import acl, sop_index
+    if not pid:
+        return ""
+    try:
+        p = sop_index.get(int(pid), user=_sop_user(request))
+    except acl.PermissionDenied:
+        return "⛔ 未登录或无权限。"
+    if not p:
+        return "这个流程看不到了（可能资料已更新或没有权限），请重新查询。"
+    return _mask(sop_index.format_text(p, detail_chars=-1, max_chars=30000))
+
+
+def sop_organize(pid, q, request: gr.Request = None):
+    from src import acl, sop_index
+    if not pid:
+        yield "先查询并选中一个流程。"
+        return
+    try:
+        p = sop_index.get(int(pid), user=_sop_user(request))
+    except acl.PermissionDenied:
+        yield "⛔ 未登录或无权限。"
+        return
+    if not p:
+        yield "这个流程看不到了，请重新查询。"
+        return
+    _track(request, "SOP 整理")
+    yield "⏳ 正在按原文整理成中文步骤（约 20~60 秒）……"
+    try:
+        yield _mask(sop_index.organize(p, q or ""))
+    except Exception as e:
+        yield f"整理失败：{e}"
+
+
 def do_worklog_recent(days, request: gr.Request = None):
     from src import acl
     try:
@@ -1113,6 +1178,7 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
         nav_kb    = gr.Button("知识库", elem_classes=["nk-navbtn", "nk-ic-kb"])
         nav_log   = gr.Button("工作日志", elem_classes=["nk-navbtn", "nk-ic-log"])
         nav_err   = gr.Button("错误码速查", elem_classes=["nk-navbtn", "nk-ic-err"])
+        nav_sop   = gr.Button("SOP 速查", elem_classes=["nk-navbtn", "nk-ic-sop"])
         nav_ts    = gr.Button("Troubleshooting 表", elem_classes=["nk-navbtn", "nk-ic-ts"])
         nav_admin = gr.Button("审计", elem_classes=["nk-navbtn", "nk-ic-audit"], visible=False)
         gr.HTML(_SIDE_RECENT)
@@ -1214,6 +1280,23 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
             err_btn = gr.Button("查询", variant="primary", scale=2)
         err_out = gr.Markdown("")
 
+    # ── 视图：SOP 速查 ──
+    with gr.Column(visible=False) as view_sop:
+        gr.HTML('<div class="nk-view" style="margin-bottom:0;"><h2>SOP 速查</h2>'
+                '<div class="nk-view-sub">从手册 / 检查表 / 自编 SOP 里拆出的完整操作流程 · 按原文顺序 · 中文也能查英文、日文手册</div></div>')
+        with gr.Row():
+            sop_q = gr.Textbox(placeholder="要做的作业，如：AIS 电压调整、wafer loader 机械手清洁、查看软件版本",
+                               show_label=False, scale=6, container=False)
+            sop_machine = gr.Dropdown(choices=[("全部机型", ""), "S207D", "S206D", "S308F", "SF100"], value="",
+                                      show_label=False, scale=2, container=False)
+            sop_btn = gr.Button("查询", variant="primary", scale=2)
+        sop_msg = gr.Markdown("")
+        sop_pick = gr.Dropdown(label="查看流程", choices=[])
+        with gr.Row():
+            sop_org_btn = gr.Button("整理成中文 SOP", scale=1)
+        sop_org = gr.Markdown("")
+        sop_md = gr.Markdown("")
+
     # ── 视图：Troubleshooting 表 ──
     with gr.Column(visible=False) as view_ts:
         gr.HTML('<div class="nk-view" style="margin-bottom:0;"><h2>Troubleshooting 表</h2>'
@@ -1311,13 +1394,18 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
                                          interactive=False, wrap=True)
 
     # ── 事件绑定 ──
-    _views = [view_chat, view_kb, view_log, view_err, view_ts, view_admin]
-    _navs = [nav_chat, nav_kb, nav_log, nav_err, nav_ts, nav_admin]
+    _views = [view_chat, view_kb, view_log, view_err, view_sop, view_ts, view_admin]
+    _navs = [nav_chat, nav_kb, nav_log, nav_err, nav_sop, nav_ts, nav_admin]
     _nav_out = _views + _navs
     nav_chat.click(lambda: _switch_view("chat"), None, _nav_out)
     nav_kb.click(lambda: _switch_view("kb"), None, _nav_out)
     nav_log.click(lambda: _switch_view("worklog"), None, _nav_out)
     nav_err.click(lambda: _switch_view("err"), None, _nav_out)
+    nav_sop.click(lambda: _switch_view("sop"), None, _nav_out)
+    sop_btn.click(sop_query, [sop_q, sop_machine], [sop_msg, sop_pick])
+    sop_q.submit(sop_query, [sop_q, sop_machine], [sop_msg, sop_pick])
+    sop_pick.change(sop_detail, [sop_pick], [sop_md]).then(lambda: "", None, [sop_org])
+    sop_org_btn.click(sop_organize, [sop_pick, sop_q], [sop_org])
     _ts_filters = [ts_f_machine, ts_f_unit, ts_f_status, ts_f_kw, ts_f_origin]
     nav_ts.click(lambda: _switch_view("ts"), None, _nav_out).then(ts_query, _ts_filters, [ts_msg, ts_df, ts_pick])
     ts_btn.click(ts_query, _ts_filters, [ts_msg, ts_df, ts_pick])

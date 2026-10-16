@@ -622,6 +622,15 @@ def main():
         print(f"  {k}: {v}")
     print(f"  镜像目录: {MIRROR.resolve()}")
 
+    # 有资料入库 / 删除 → 刷新 SOP 目录（只重算内容变了的流程的向量，几秒到几十秒）
+    if stats.get("ingested") or stats.get("deleted") or stats.get("renamed"):
+        try:
+            from src import sop_index
+            print("\n刷新 SOP 目录 ...")
+            print(" ", sop_index.build(log=lambda m: print("  " + m)))
+        except Exception as e:
+            print(f"  ⚠️  SOP 目录刷新失败（不影响同步）: {e}")
+
 
 if __name__ == "__main__":
     main()

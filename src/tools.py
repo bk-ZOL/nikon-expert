@@ -252,6 +252,22 @@ def build_tools(collector: SourceCollector, retriever=None, question: str = "", 
             return ts_table.lookup_for_agent(annotate(query), acl.get_current_user(), want_models=want or None)
         return _memo("troubleshooting_lookup", query, run)
 
+    def procedure_lookup(query: str) -> str:
+        """查操作步骤目录：手册 / 检查表 / 自己写的 SOP 里完整的操作流程（拆装、调整、清洁、软件操作、确认作业），
+        按原文顺序列出每一步。问「怎么做 / 步骤 / 流程 / SOP / 如何调整、更换、清洁、确认」时**先用本工具**，
+        比 keyword_search 零散命中的片段完整。中英日文手册都能用中文查。
+        参数 query: 要做的作业（如「AIS 电压调整」「wafer loader 机械手清洁」「查看软件版本」）。"""
+        def run():
+            from src import acl, sop_index
+            hits = sop_index.search(query, user=acl.get_current_user(), want_models=want or None, k=3)
+            if not hits:
+                return f"操作步骤目录里没找到与「{query}」相关的流程。可以换个说法，或用 keyword_search。"
+            collector.add([{"doc_id": p["doc_id"], "doc_name": p["doc_name"], "doc_type": p["doc_type"],
+                            "section_title": p["title"], "machine_model": p["machine_model"]} for p in hits],
+                          tool="procedure_lookup")
+            return "\n\n".join(sop_index.format_text(p, md=False, detail_chars=300, max_chars=3500) for p in hits)
+        return _memo("procedure_lookup", query, run)
+
     def fault_history_lookup(query: str) -> str:
         """在厂内故障履历中查历史相似案例（曾经怎么处理、换了什么、结果如何）。
         定位根因或想找处置先例时使用。
@@ -309,7 +325,7 @@ def build_tools(collector: SourceCollector, retriever=None, question: str = "", 
                 acl.reset_current_user(tok)
         return wrapped
 
-    fns = [troubleshooting_lookup, error_code_lookup, keyword_search, semantic_search, fault_history_lookup,
+    fns = [troubleshooting_lookup, error_code_lookup, procedure_lookup, keyword_search, semantic_search, fault_history_lookup,
            inspect_diagram, trace_connection, netlist_trace]
     if not _vision_available():
         fns.remove(inspect_diagram)   # 看图模型连不上时不给智能体，免得每次白白失败一步
