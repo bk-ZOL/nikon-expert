@@ -37,6 +37,7 @@ _CIRCLED_RE = re.compile(rf"^(?:[-*•]\s+)?([{_CIRCLED}])\s*(\S.*)$")
 _SECTION_RE = re.compile(r"^(?:chapter\s+|第)?\d+(?:\.\d+)+\.?\s+\S", re.I)      # 3.2 Operation Procedures
 _SUBSEC_RE = re.compile(r"^[(（]\s*(?:\d{1,2}|[a-z])\s*[)）]\s*\S", re.I)           # (1) Specifying …
 # 这些标题是步骤里的提示框，不是新章节
+_BOLD_SUBSEC_RE = re.compile(r"^\s*(?:[-*•]\s+)?\*\*\s*[(（]\s*\d{1,2}\s*[)）]\s*[^*]{2,90}\*\*\s*$")
 _NOTE_RE = re.compile(r"^(?:note|notes|caution|warning|danger|important|reference|tip|memo|"
                       r"注意|警告|危険|注記|参考|备注|備考|メモ|figure|fig\.|table|図|表)\b", re.I)
 _PAGE_RES = [re.compile(r"■\s*([0-9]+(?:-[0-9]+)+)\s*■"), re.compile(r"\bP\.\s*([0-9]+(?:-[0-9]+)*(?:/[0-9]+)?)")]
@@ -141,6 +142,9 @@ def _stream(rows):
     freq = Counter(_clean(t) for k, t, _ in raw if k == "body")
     out = []
     for kind, t, rid in raw:
+        if kind == "body" and _BOLD_SUBSEC_RE.match(t):
+            kind = "heading"               # 正文里整行加粗的「(3) Locking Out …」：小节标题没单独成段
+            t = re.sub(r"^\s*[-*•]\s+", "", t)
         page = None
         for pr in _PAGE_RES:
             m = pr.search(t)
@@ -270,6 +274,9 @@ def _group_key(p: dict) -> str:
 def _embed_text(p: dict) -> str:
     head = " ".join(x for x in (p["breadcrumb"], p["title"], p.get("intro", "")) if x)
     steps = "；".join(s["text"] for s in p["steps"][:6])
+    if p.get("whole"):                     # 整份收录的：小标题常常只是「目的」「Sheet1」，加上正文开头
+        body = " ".join((s.get("detail") or "").replace("\n", " ") for s in p["steps"])
+        return f"{head}\n{steps}\n{body}"[:1200]
     return f"{head}\n{steps}"[:800]
 
 
@@ -421,9 +428,14 @@ def _allowed_docs(user):
     return {r[0] for r in rows}
 
 
+_MODEL_IN_TEXT_RE = re.compile(r"(?<![\w.])(?:nsr-?)?(?:s?(?:20[5-8]|30[5-8])[a-z]?|sf\d{3}|[ae][rx]-?x\d)(?![\w.])", re.I)
+_MODEL_WORD_RE = re.compile(r"^(?:nsr-?)?(?:s\d{3}[a-z]?|sf\d{3}|[ae][rx]-?x\d)$")
+
+
 def _terms(q: str) -> list:
     words = [w for w in re.findall(r"[a-z][a-z0-9\-]{2,}|\d+[a-z]+\d*", q.lower())
-             if w not in {"the", "and", "how", "procedure", "sop", "step", "steps"}]
+             if w not in {"the", "and", "how", "procedure", "sop", "step", "steps"}
+             and not _MODEL_WORD_RE.match(w)]     # 机型只用来加权（model_factor），不当关键词
     cjk = [w for w in re.findall(r"[一-鿿぀-ヿｦ-ﾟ]{2,}", q)
            if w not in {"怎么", "如何", "步骤", "流程", "操作", "方法", "作业", "一下", "怎样"}]
     return words + cjk
@@ -440,7 +452,9 @@ def search(query: str, user=None, want_models=None, machine_model: str = "", k: 
     ids, mat = _matrix()
     scores = {}
     if len(mat):
-        qv = np.asarray(_embedder().get_query_embedding(q), dtype=np.float32)
+        # 机型名不进向量：「S207D 卤素灯更换」会被标题带 S207 的资料带偏，机型交给 model_factor 加权
+        qe = _MODEL_IN_TEXT_RE.sub(" ", q).strip() or q
+        qv = np.asarray(_embedder().get_query_embedding(qe), dtype=np.float32)
         qv /= np.linalg.norm(qv) + 1e-9
         sims = mat @ qv
         top = np.argsort(-sims)[:300]
@@ -470,14 +484,17 @@ def search(query: str, user=None, want_models=None, machine_model: str = "", k: 
         if r["doc_type"] == "sop":
             s += 0.08                      # 自己写的 SOP：现场验证过、中文
         s *= 0.85 + 0.15 * mm.model_factor(r["machine_model"], q if not machine_model else machine_model)
+        name_fams = mm.models_in_query(r["doc_name"])
+        if want and name_fams and not any(f in want for f in name_fams):
+            s *= 0.93                      # 文件名写明是别的机型（有的资料机型标签打错了，以文件名为准再压一下）
         s += 0.005 * min(r["n_steps"], 10)
         ranked.append((s, r))
     ranked.sort(key=lambda x: -x[0])
     out, groups = [], {}
     for s, r in ranked:
         g = r["group_key"]
-        same = (r["doc_name"], r["title"])
-        if same in groups:                 # 同一份资料里同标题的几段（表格里 STEP1/STEP2 各自编号）：只列第一段
+        same = (r["doc_name"], r["breadcrumb"] or r["title"])
+        if same in groups:                 # 同一章节的几部分 / 同标题的几段：只列一次（详情里合在一起）
             continue
         if g in groups:
             groups[g]["also_in"].append(r["doc_name"])
@@ -491,7 +508,38 @@ def search(query: str, user=None, want_models=None, machine_model: str = "", k: 
         out.append(d)
         if len(out) >= k:
             break
-    return out
+    return [expand(d, c) for d in out]
+
+
+MAX_PARTS = 12              # 一个章节下超过这么多段流程就不合并（多半是参数说明这类大杂烩章节）
+
+
+def expand(p: dict, c=None) -> dict:
+    """同一章节（breadcrumb 相同）下的几段流程合成一个完整作业：
+    如「11.1 Replacing the Halogen Lamp」下的 (1) Displaying the ITV Monitor、(2) Turning Off …、(3) Locking Out …。
+    每一步带 part（所属小节），format_text 按小节分段显示。"""
+    if not p.get("breadcrumb") or p.get("parts"):
+        return p
+    c = c or _conn()
+    sibs = c.execute("SELECT * FROM procedures WHERE doc_id = ? AND breadcrumb = ? ORDER BY rid_start",
+                     (p["doc_id"], p["breadcrumb"])).fetchall()
+    if len(sibs) <= 1 or len(sibs) > MAX_PARTS:
+        return p
+    q = dict(p)
+    q["steps"] = []
+    for sb in sibs:
+        for st in json.loads(sb["steps"]):
+            st["part"] = sb["title"]
+            q["steps"].append(st)
+    q["parts"] = [sb["title"] for sb in sibs]
+    q["hit_part"] = p["title"]
+    q["title"], q["breadcrumb"] = p["breadcrumb"], ""
+    q["n_steps"] = len(q["steps"])
+    first, last = sibs[0]["page"] or "", sibs[-1]["page"] or ""
+    a, b = first.split("～")[0], last.split("～")[-1]
+    q["page"] = a if a == b else (f"{a}～{b}" if a and b else a or b)
+    q["intro"] = sibs[0]["intro"] or ""
+    return q
 
 
 def get(pid: int, user=None):
@@ -507,7 +555,7 @@ def get(pid: int, user=None):
     d["steps"] = json.loads(d["steps"])
     d["also_in"] = [x["doc_name"] for x in c.execute(
         "SELECT DISTINCT doc_name FROM procedures WHERE group_key = ? AND id != ?", (r["group_key"], r["id"]))]
-    return d
+    return expand(d, c)
 
 
 def cite(p: dict) -> str:
@@ -527,8 +575,14 @@ def format_text(p: dict, md: bool = True, detail_chars: int = 400, max_chars: in
         lines.append("同样的流程也在：" + "、".join(sorted(set(p["also_in"]))[:5]))
     if p.get("intro"):
         lines.append(p["intro"])
+    if p.get("parts"):
+        lines.append(f"共 {len(p['parts'])} 部分：" + "、".join(p["parts"]))
     lines.append("")
+    part = None
     for s in p["steps"]:
+        if s.get("part") and s["part"] != part:
+            part = s["part"]
+            lines.append(f"\n#### {part}" if md else f"\n〔{part}〕")
         lines.append(f"{s['n']}. {('**' + s['text'] + '**') if md else s['text']}")
         if s.get("detail") and detail_chars:
             det = s["detail"] if detail_chars < 0 else \
@@ -544,8 +598,9 @@ ORGANIZE_PROMPT = """你是光刻机现场工程师的助手。下面是从 Niko
 
 要求：
 1. **只用原文里有的内容**，不得补充原文没写的步骤、数值、工具、按钮。原文没写的项就写「原文未写」。
-2. 按钮名、菜单名、参数名、指令、数值、单位保持原文（如 [Select]、Focus Offset、-30.000 to 30.000 µm），后面可以括号加中文解释。
-3. 步骤编号和顺序与原文一致，不合并、不拆分；每步写「做什么」，有画面变化/确认点的写成「→ 确认：…」。
+2. 正文直接写成通顺的中文，普通名词（清洁布、有机溶剂、装载臂…）直接用中文，**不要**写成「英文（中文）」。
+   只有画面上能看到的按钮名、菜单名、窗口名、参数名、指令、数值、单位保持原文（如 [Select]、Focus Offset、-30.000 to 30.000 µm）。
+3. 步骤编号和顺序与原文一致，不合并、不拆分；原文分了几部分（〔…〕）就按部分分小标题。每步写「做什么」，有画面变化/确认点的写成「→ 确认：…」。
 4. 原文里的 NOTE / CAUTION / WARNING 放进对应步骤，标 ⚠️。
 5. 结尾一行写来源：{cite}
 
