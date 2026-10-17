@@ -41,7 +41,7 @@ local files ─manual─┘   (PDF/Word/Excel/md, OCR,           ├→ SOP cata
 
 | Step | Model | Note |
 |---|---|---|
-| Interactive Q&A, rewriting one SOP | deepseek-v4-flash (cloud) | only a few retrieved passages per question; background "thinking" off by default |
+| Interactive Q&A, rewriting one SOP | deepseek-flash (V4.1, cloud) | only a few retrieved passages per question; background "thinking" off by default |
 | Embeddings | SiliconFlow bge-m3 (cloud, free) | terms state no training, data destroyed after inference |
 | **Bulk distillation / extraction** | **gemma4 on the user's Mac (local)** | never sent to the cloud; stops if the Mac is unavailable |
 | Anthropic API | not used | not available to China-controlled companies |

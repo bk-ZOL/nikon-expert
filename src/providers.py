@@ -76,9 +76,9 @@ PROVIDERS = {
         "label": "DeepSeek（深度求索）",
         "kind": "openai",
         "base_url": "https://api.deepseek.com/v1",
-        # v4-flash：快/便宜/直答；v4-pro：推理模型(先想后答)，更强更慢，需足够 max_tokens。
-        # 旧的 deepseek-chat/deepseek-reasoner 已被官方下线，勿再用。
-        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+        # deepseek-flash = DeepSeek-V4.1-Flash（2026-09 上线，快/便宜，能看图）；v4-pro：更强更慢，需足够 max_tokens。
+        # 旧名 deepseek-v4-flash 已下线、目前转到 deepseek-flash；更早的 deepseek-chat/deepseek-reasoner 也已下线，勿再用。
+        "models": ["deepseek-flash", "deepseek-v4-pro"],
         "key_env": "DEEPSEEK_API_KEY",
         "use_proxy": False,
         "needs_key": True,
