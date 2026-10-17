@@ -91,12 +91,15 @@ def _models(fts):
 
 
 _PRIO = {"S207D": 0, "COMMON": 1, "S206D": 2}
+# 专门讲故障的资料（エラー要因分析、REPAIR MANUAL、トラブル要因シート、Troubleshooting Guide）最有用，不分机型最先做
+_TROUBLE_DOC = re.compile(r"トラブル|要因|repair|troubleshoot|故障|エラー|error handling", re.I)
 
 
 def oem_windows():
-    """[(doc, machine, text, section, score)]：先 S207D、再通用、再 S206D、最后其他机型；同一档里「异常 → 处理」写法越密越先做。"""
+    """[(doc, machine, text, section, score)]：先做专门讲故障的资料（不分机型），再按 S207D → 通用 → S206D → 其他机型；
+    同一档里「异常 → 处理」写法越密越先做。"""
     wins = list(_oem_windows_raw())
-    wins.sort(key=lambda w: (_PRIO.get(w[1], 3), -w[4]))
+    wins.sort(key=lambda w: (0 if _TROUBLE_DOC.search(w[0]) else 1, _PRIO.get(w[1], 3), -w[4]))
     return wins
 
 
