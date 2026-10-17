@@ -54,3 +54,4 @@ pandas==2.3.3
 
 # 新版 SQLite（FTS5 trigram，兼容老系统如 AlmaLinux 8）
 pysqlite3-binary
+matplotlib==3.10.8   # OVL 分析页（ovl-analyzer 画图）

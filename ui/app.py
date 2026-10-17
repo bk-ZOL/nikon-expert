@@ -470,9 +470,9 @@ def do_get_fts_paths():
     return pd.DataFrame(paths)
 
 
-_VIEWS = ["chat", "kb", "worklog", "err", "sop", "ts", "admin"]
+_VIEWS = ["chat", "kb", "worklog", "err", "sop", "ovl", "ts", "admin"]
 # 与 _VIEWS 对齐的导航图标类（切视图时要一并带上，否则 elem_classes 覆盖会丢图标）
-_NAV_ICONS = ["nk-ic-chat", "nk-ic-kb", "nk-ic-log", "nk-ic-err", "nk-ic-sop", "nk-ic-ts", "nk-ic-audit"]
+_NAV_ICONS = ["nk-ic-chat", "nk-ic-kb", "nk-ic-log", "nk-ic-err", "nk-ic-sop", "nk-ic-ovl", "nk-ic-ts", "nk-ic-audit"]
 
 
 def _is_admin_user(request) -> bool:
@@ -985,6 +985,51 @@ def sop_organize(pid, q, request: gr.Request = None):
         yield f"整理失败：{e}"
 
 
+# ── OVL 分析（MESR 浏览 + 10 参数拆分，代码来自 ovl-analyzer）──
+def ovl_files(files, request: gr.Request = None):
+    from src import ovl_view
+    paths = [f if isinstance(f, str) else getattr(f, "name", "") for f in (files or [])]
+    if not paths:
+        return pd.DataFrame(), gr.update(choices=[], value=None), "上传 MESR 文件（可以多选，`.MESR;5` 这类 VMS 文件名也行）。"
+    _track(request, "OVL 分析")
+    df, choices = ovl_view.file_table(paths)
+    return df, gr.update(choices=choices, value=choices[0][1] if choices else None), f"共 {len(paths)} 个文件，下拉选一个查看。"
+
+
+def ovl_show(path, scale):
+    from src import ovl_view
+    empty = ("", None, pd.DataFrame(), "", "", gr.update(choices=[], value=None, interactive=False),
+             pd.DataFrame(), "", None)
+    if not path:
+        return empty
+    try:
+        r = ovl_view.show(path, scale)
+    except Exception as e:
+        return (f"读取失败：{type(e).__name__}: {e}",) + empty[1:]
+    if not r["can_fit"]:
+        return (r["info"], r["image"], r["table"], r["header"], r["raw"],
+                gr.update(choices=[], value=None, interactive=False), pd.DataFrame(),
+                "这个文件不是叠对类（晶圆矢量图）数据，不做 10 参数拆分。", None)
+    ws = ovl_view.wafers(path)
+    tp = ovl_view.ten_param(path, ws[0], scale) if ws else {"params": pd.DataFrame(), "stats": "没有可拟合的数据。", "image": None}
+    return (r["info"], r["image"], r["table"], r["header"], r["raw"],
+            gr.update(choices=[(f"Wafer {w}", w) for w in ws], value=ws[0] if ws else None, interactive=True),
+            tp["params"], tp["stats"], tp["image"])
+
+
+def ovl_image(path, scale):
+    from src import ovl_view
+    return ovl_view.show(path, scale)["image"] if path else None
+
+
+def ovl_fit(path, wafer, scale):
+    from src import ovl_view
+    if not path or wafer is None:
+        return pd.DataFrame(), "", None
+    tp = ovl_view.ten_param(path, int(wafer), scale)
+    return tp["params"], tp["stats"], tp["image"]
+
+
 def do_worklog_recent(days, request: gr.Request = None):
     from src import acl
     try:
@@ -1182,6 +1227,7 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
         nav_log   = gr.Button("工作日志", elem_classes=["nk-navbtn", "nk-ic-log"])
         nav_err   = gr.Button("错误码速查", elem_classes=["nk-navbtn", "nk-ic-err"])
         nav_sop   = gr.Button("SOP 速查", elem_classes=["nk-navbtn", "nk-ic-sop"])
+        nav_ovl   = gr.Button("OVL 分析", elem_classes=["nk-navbtn", "nk-ic-ovl"])
         nav_ts    = gr.Button("Troubleshooting 表", elem_classes=["nk-navbtn", "nk-ic-ts"])
         nav_admin = gr.Button("审计", elem_classes=["nk-navbtn", "nk-ic-audit"], visible=False)
         gr.HTML(_SIDE_RECENT)
@@ -1300,6 +1346,33 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
         sop_org = gr.Markdown("")
         sop_md = gr.Markdown("")
 
+    # ── 视图：OVL 分析 ──
+    with gr.Column(visible=False) as view_ovl:
+        gr.HTML('<div class="nk-view" style="margin-bottom:0;"><h2>OVL 分析</h2>'
+                '<div class="nk-view-sub">上传 MESR 测量文件：晶圆矢量图 / 曲线、数据表、文件头；叠对类数据做 10 参数拆分'
+                '（晶圆级 Tx Ty Sx Sy Rw Ow ＋ Shot 内 tx ty sx sy rs os）· 文件只在这次使用，不入库</div></div>')
+        ovl_up = gr.File(label="MESR 文件（可多选）", file_count="multiple", type="filepath")
+        ovl_msg = gr.Markdown("上传 MESR 文件（可以多选，`.MESR;5` 这类 VMS 文件名也行）。")
+        ovl_list = gr.Dataframe(interactive=False, wrap=True, max_height=260)
+        with gr.Row():
+            ovl_pick = gr.Dropdown(label="查看文件", choices=[], scale=4)
+            ovl_scale = gr.Slider(0.25, 4, value=1, step=0.25, label="箭头倍率（相对自动倍率）", scale=2)
+        ovl_info = gr.Markdown("")
+        with gr.Tabs():
+            with gr.Tab("图形"):
+                ovl_img = gr.Image(type="pil", show_label=False, interactive=False)
+            with gr.Tab("10 参数拆分"):
+                ovl_wafer = gr.Dropdown(label="Wafer", choices=[], interactive=False)
+                ovl_params = gr.Dataframe(interactive=False, wrap=True)
+                ovl_stats = gr.Markdown("")
+                ovl_res_img = gr.Image(type="pil", show_label=False, interactive=False)
+            with gr.Tab("数据表"):
+                ovl_table = gr.Dataframe(interactive=False, max_height=480)
+            with gr.Tab("文件头"):
+                ovl_header = gr.Textbox(show_label=False, lines=18, max_lines=40, interactive=False)
+            with gr.Tab("原文"):
+                ovl_raw = gr.Textbox(show_label=False, lines=18, max_lines=40, interactive=False)
+
     # ── 视图：Troubleshooting 表 ──
     with gr.Column(visible=False) as view_ts:
         gr.HTML('<div class="nk-view" style="margin-bottom:0;"><h2>Troubleshooting 表</h2>'
@@ -1397,14 +1470,21 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
                                          interactive=False, wrap=True)
 
     # ── 事件绑定 ──
-    _views = [view_chat, view_kb, view_log, view_err, view_sop, view_ts, view_admin]
-    _navs = [nav_chat, nav_kb, nav_log, nav_err, nav_sop, nav_ts, nav_admin]
+    _views = [view_chat, view_kb, view_log, view_err, view_sop, view_ovl, view_ts, view_admin]
+    _navs = [nav_chat, nav_kb, nav_log, nav_err, nav_sop, nav_ovl, nav_ts, nav_admin]
     _nav_out = _views + _navs
     nav_chat.click(lambda: _switch_view("chat"), None, _nav_out)
     nav_kb.click(lambda: _switch_view("kb"), None, _nav_out)
     nav_log.click(lambda: _switch_view("worklog"), None, _nav_out)
     nav_err.click(lambda: _switch_view("err"), None, _nav_out)
     nav_sop.click(lambda: _switch_view("sop"), None, _nav_out)
+    nav_ovl.click(lambda: _switch_view("ovl"), None, _nav_out)
+    _ovl_out = [ovl_info, ovl_img, ovl_table, ovl_header, ovl_raw, ovl_wafer, ovl_params, ovl_stats, ovl_res_img]
+    ovl_up.change(ovl_files, [ovl_up], [ovl_list, ovl_pick, ovl_msg])
+    ovl_pick.change(ovl_show, [ovl_pick, ovl_scale], _ovl_out, concurrency_limit=4, concurrency_id="ovl")
+    ovl_scale.release(ovl_image, [ovl_pick, ovl_scale], [ovl_img], concurrency_limit=4, concurrency_id="ovl")
+    ovl_scale.release(ovl_fit, [ovl_pick, ovl_wafer, ovl_scale], [ovl_params, ovl_stats, ovl_res_img])
+    ovl_wafer.input(ovl_fit, [ovl_pick, ovl_wafer, ovl_scale], [ovl_params, ovl_stats, ovl_res_img])
     sop_btn.click(sop_query, [sop_q, sop_machine], [sop_msg, sop_pick], concurrency_limit=4, concurrency_id="sop")
     sop_q.submit(sop_query, [sop_q, sop_machine], [sop_msg, sop_pick], concurrency_limit=4, concurrency_id="sop")
     sop_pick.change(sop_detail, [sop_pick], [sop_md]).then(lambda: "", None, [sop_org])
