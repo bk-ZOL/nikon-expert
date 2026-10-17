@@ -14,6 +14,7 @@
 权限：需要「故障履历」类别 + 对应机型；客户来源的案例只给有该客户权限的人看。
 数据在 data/ts_table.db（独立库，不和全文检索抢锁）。
 """
+import datetime
 import hashlib
 import json
 import os
@@ -157,8 +158,79 @@ def _llm(prompt: str, bulk: bool = True) -> str:
 
 
 # ── 1. 原文窗口 ───────────────────────────────────────────────────────
+_DAY_SEC = re.compile(r"^工作日志 (\d{4}-\d{2}-\d{2})$")
+
+
+def _day_key(date: str, text: str) -> str:
+    return "d:" + hashlib.md5((date + re.sub(r"[\s*#_|>`-]+", "", text or "")).encode()).hexdigest()
+
+
+def _old_windows(rows):
+    """改成按周分段之前的切法（按顺序拼到 ~2600 字），只用来认出哪些天以前已经提炼过。"""
+    buf, days = "", []
+    for sec, text in rows:
+        text = (text or "").strip()
+        if len(_TEMPLATE_WORDS.sub("", text)) < MIN_CONTENT_CHARS:
+            continue
+        if buf and len(buf) + len(text) > WINDOW_CHARS:
+            yield buf, days
+            buf, days = "", []
+        buf += f"\n【{sec}】\n{text}" if sec else f"\n{text}"
+        days.append((sec, text))
+    if buf:
+        yield buf, days
+
+
+def worklog_windows(c, name, rows):
+    """持续更新的履历 / 工作日志（一天一条「工作日志 YYYY-MM-DD」）：按天认、按周分段。
+    以前按 2600 字顺序切，每加一天后面全部错位、整篇重做；现在每天记一个指纹，只送没提炼过的天，
+    同一周的放在一段里（一周里改了一天，只重做这一天）。以前按老切法做过的天照样认。
+    返回 [(text, section, day_keys)]。"""
+    done = set()
+    # 改按天认之前提炼过的履历：上次提炼时已经写好的天（日期早于上次提炼那天）算做过。
+    # 那之后才改的老日子这次认不出来（很少见）；从现在起每天都有指纹，改了哪天就重做哪天
+    last = c.execute("SELECT MAX(done_at) FROM ts_windows WHERE src_doc=? AND hash NOT LIKE 'd:%'", (name,)).fetchone()[0]
+    cutoff = (last or "")[:10]
+    if cutoff:
+        for sec, text in rows:
+            m = _DAY_SEC.match(sec or "")
+            if m and m.group(1) < cutoff:
+                done.add(_day_key(m.group(1), (text or "").strip()))
+    for buf, days in _old_windows(rows):                 # 老切法做过的窗口 → 里面的天都算做过
+        h = hashlib.md5((name + buf).encode()).hexdigest()
+        hc = "c:" + hashlib.md5(re.sub(r"[\s*#_|>`-]+", "", buf).encode()).hexdigest()
+        if c.execute("SELECT 1 FROM ts_windows WHERE hash IN (?, ?)", (h, hc)).fetchone():
+            done |= {_day_key(_DAY_SEC.match(sec).group(1), t.strip()) for sec, t in days if _DAY_SEC.match(sec or "")}
+    weeks = {}
+    for sec, text in rows:
+        m = _DAY_SEC.match(sec or "")
+        text = (text or "").strip()
+        if not m or len(_TEMPLATE_WORDS.sub("", text)) < MIN_CONTENT_CHARS:
+            continue
+        dk = _day_key(m.group(1), text)
+        if dk in done or c.execute("SELECT 1 FROM ts_windows WHERE hash=?", (dk,)).fetchone():
+            continue
+        y, w, _ = datetime.date.fromisoformat(m.group(1)).isocalendar()
+        weeks.setdefault((y, w), []).append((m.group(1), text, dk))
+    out = []
+    for (y, w), days in sorted(weeks.items()):
+        days.sort()
+        chunk, keys, size = [], [], 0
+        for date, text, dk in days:                       # 一周内容太长也照样按 2600 字再分
+            if chunk and size + len(text) > WINDOW_CHARS:
+                out.append(("".join(chunk), f"{y}-W{w:02d}", keys))
+                chunk, keys, size = [], [], 0
+            chunk.append(f"\n【工作日志 {date}】\n{text}")
+            keys.append(dk)
+            size += len(text)
+        if chunk:
+            out.append(("".join(chunk), f"{y}-W{w:02d}", keys))
+    return out
+
+
 def source_windows(only_doc: str = None):
-    """[(src_doc, machine, customer, text, section)]：履历/日志/客户交付物按段拼成 ~2600 字的窗口。"""
+    """[(src_doc, machine, customer, text, section, day_keys)]：履历/日志/客户交付物按段拼成 ~2600 字的窗口。
+    一天一条的工作日志按天认、按周分段（day_keys 是这一段包含的天），其余资料照旧按顺序切（day_keys=None）。"""
     fts = sqlite3.connect(os.getenv("FTS_DB_PATH", "./data/fts.db"))
     docs = fts.execute(f"""
         SELECT filename, MAX(models), MAX(customer) FROM doc_acl
@@ -169,19 +241,24 @@ def source_windows(only_doc: str = None):
             continue
         machine = next((m for m in (models or "").split(",") if m and m != "ALL"), "S207D")
         rows = fts.execute("SELECT section_title, text FROM doc_fts WHERE doc_name=? ORDER BY rowid", (name,)).fetchall()
+        if rows and sum(1 for sec, _ in rows if _DAY_SEC.match(sec or "")) >= len(rows) * 0.8:
+            with _conn() as c:
+                for text, section, keys in worklog_windows(c, name, rows):
+                    yield name, machine, cust or "none", text, section, keys
+            continue
         buf, secs = "", []
         for sec, text in rows:
             text = (text or "").strip()
             if len(_TEMPLATE_WORDS.sub("", text)) < MIN_CONTENT_CHARS:
                 continue
             if buf and len(buf) + len(text) > WINDOW_CHARS:
-                yield name, machine, cust or "none", buf, " / ".join(secs[:3])
+                yield name, machine, cust or "none", buf, " / ".join(secs[:3]), None
                 buf, secs = "", []
             buf += f"\n【{sec}】\n{text}" if sec else f"\n{text}"
             if sec:
                 secs.append(sec.strip("# ")[:40])
         if buf:
-            yield name, machine, cust or "none", buf, " / ".join(secs[:3])
+            yield name, machine, cust or "none", buf, " / ".join(secs[:3]), None
     fts.close()
 
 
@@ -425,7 +502,7 @@ def refresh_entries(c, eids, log=print):
 def run(limit: int = 0, only_doc: str = None, log=print) -> dict:
     c = _conn()
     stat = {"windows": 0, "skipped": 0, "cases": 0, "entries": set()}
-    for src_doc, machine, cust, text, section in source_windows(only_doc):
+    for src_doc, machine, cust, text, section, day_keys in source_windows(only_doc):
         h = hashlib.md5((src_doc + text).encode()).hexdigest()               # 老算法，认旧记录用
         hc = "c:" + hashlib.md5(re.sub(r"[\s*#_|>`-]+", "", text).encode()).hexdigest()   # 只看内容
         if c.execute("SELECT 1 FROM ts_windows WHERE hash IN (?, ?)", (h, hc)).fetchone():
@@ -447,6 +524,9 @@ def run(limit: int = 0, only_doc: str = None, log=print) -> dict:
                 stat["entries"].add(eid)
         c.execute("INSERT OR REPLACE INTO ts_windows(hash, src_doc, n_cases, done_at) VALUES (?,?,?,?)",
                   (hc, src_doc, len(cases), _now()))
+        for dk in day_keys or []:          # 工作日志：这一段里的每一天都记上，以后不管怎么分段都不重做
+            c.execute("INSERT OR REPLACE INTO ts_windows(hash, src_doc, n_cases, done_at) VALUES (?,?,?,?)",
+                      (dk, src_doc, 0, _now()))
         c.commit()
         stat["cases"] += n_new
         log(f"  {src_doc[:36]:36s} {section[:28]:28s} → {len(cases)} 条（新 {n_new}）")
