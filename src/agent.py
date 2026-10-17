@@ -238,7 +238,10 @@ async def _agent_events(question: str, history=None):
         max_iterations=MAX_ITER,
     )
 
-    handler = agent.run(question, chat_history=_to_chat_history(history))
+    # 问题里的缩写附上对照（RR = Reticle Rotation …），让它检索时用全称、几种意思按上下文选
+    from src import glossary
+    hint = glossary.hint(question)
+    handler = agent.run(f"{question}\n\n{hint}" if hint else question, chat_history=_to_chat_history(history))
 
     async for ev in handler.stream_events():
         # 注意：ToolCallResult 是 ToolCall 的子类，必须先判子类

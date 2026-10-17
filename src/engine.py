@@ -459,7 +459,9 @@ def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
             # 实体优先：对显著领域名词（氦气/encoder…）各做一次定向 FTS，
             # 保证这类"细节名词"不被整句里的高频词淹没（追加进 FTS 候选池）。
             seen_terms = set()
-            for term in extract_key_terms(question)[:4]:
+            # 缩写先按对照表展开成全称（RR → Reticle Rotation / レチクルローテーション），手册里多半写的是全称
+            from src import glossary
+            for term in glossary.expansions(question, max_terms=4) + extract_key_terms(question)[:4]:
                 if term in seen_terms:
                     continue
                 seen_terms.add(term)
@@ -473,7 +475,8 @@ def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
     report(f"语义检索：找意思相近的资料（关键词已命中 {len(fts_results)} 条）")
     semantic_results = []
     try:
-        nodes = _retrieve_semantic(eng, question, user, top_k)
+        from src import glossary
+        nodes = _retrieve_semantic(eng, glossary.augment(question), user, top_k)
         semantic_results = [n for n in nodes if (n.score or 0.0) >= threshold]
     except acl.PermissionDenied:
         raise

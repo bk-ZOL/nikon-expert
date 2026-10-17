@@ -202,6 +202,9 @@ def build_tools(collector: SourceCollector, retriever=None, question: str = "", 
         参数 query: 空格分隔的关键词。"""
         def run():
             results = _by_model(search_fts(query.strip(), limit=12))[:6]
+            from src import glossary            # 参数里还是缩写时，补搜全称
+            for term in glossary.expansions(query, max_terms=3):
+                results += _by_model(search_fts(term, limit=6))[:3]
             collector.add(results, tool="keyword_search")
             return _format(results, empty=f"未搜索到与「{query}」相关的内容。")
         return _memo("keyword_search", query, run)

@@ -270,6 +270,8 @@ def main():
             from src import sop_index
             print("\n刷新 SOP 目录 ...")
             print(" ", sop_index.build(log=lambda m: print("  " + m)))
+            from src import glossary
+            glossary.build(log=lambda m: print("  " + m))
         except Exception as e:
             print(f"  ⚠️  SOP 目录刷新失败（不影响同步）: {e}")
 

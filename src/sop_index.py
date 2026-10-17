@@ -453,14 +453,16 @@ def search(query: str, user=None, want_models=None, machine_model: str = "", k: 
     scores = {}
     if len(mat):
         # 机型名不进向量：「S207D 卤素灯更换」会被标题带 S207 的资料带偏，机型交给 model_factor 加权
-        qe = _MODEL_IN_TEXT_RE.sub(" ", q).strip() or q
+        from src import glossary                 # 缩写补上全称（RR → Reticle Rotation …）
+        qe = glossary.augment(_MODEL_IN_TEXT_RE.sub(" ", q).strip() or q)
         qv = np.asarray(_embedder().get_query_embedding(qe), dtype=np.float32)
         qv /= np.linalg.norm(qv) + 1e-9
         sims = mat @ qv
         top = np.argsort(-sims)[:300]
         scores = {ids[i]: float(sims[i]) for i in top}
     c = _conn()
-    terms = _terms(q)
+    from src import glossary
+    terms = _terms(q) + [t for t in glossary.expansions(q) if t]
     # 关键词：标题里出现查询词的也捞进来（向量没覆盖到的英文缩写、按钮名）
     for t in terms[:6]:
         for r in c.execute("SELECT id FROM procedures WHERE title LIKE ? OR breadcrumb LIKE ? LIMIT 200",
