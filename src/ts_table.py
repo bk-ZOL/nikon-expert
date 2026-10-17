@@ -132,7 +132,14 @@ def _parse_json(text: str, kind="list"):
 
 def _llm(prompt: str) -> str:
     """直接调 OpenAI 兼容接口（deepseek）。默认思考档会把 max_tokens 全用在思考上、正文为空，
-    所以思考档设 low（TS_REASONING，off=关闭思考），输出上限放宽（TS_MAX_TOKENS）。"""
+    所以思考档设 low（TS_REASONING，off=关闭思考），输出上限放宽（TS_MAX_TOKENS）。
+    TS_LLM=local：改用 Mac 上的本地模型（src/local_llm.py，资料不出自己的设备）；Mac 不可用就报错，不退回云端。"""
+    if os.getenv("TS_LLM", "").lower() == "local":
+        from src import local_llm
+        ok, why = local_llm.available(require_idle=False)
+        if not ok:
+            raise RuntimeError(f"本地模型不可用：{why}")
+        return local_llm.chat(prompt)
     from llama_index.core import Settings
     from openai import OpenAI
     llm = Settings.llm
