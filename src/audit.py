@@ -28,18 +28,21 @@ def _db_path() -> str:
         return os.getenv("FTS_DB_PATH", "./data/fts.db")
 
 
+_tls = threading.local()
+
+
 def _conn():
-    global _conn_obj
-    if _conn_obj is None:
-        with _conn_lock:
-            if _conn_obj is None:
-                try:
-                    import pysqlite3 as sqlite3  # 与 fulltext 一致，优先 pysqlite3
-                except Exception:
-                    import sqlite3
-                _conn_obj = sqlite3.connect(_db_path(), check_same_thread=False, timeout=10)
-                _conn_obj.execute("PRAGMA busy_timeout=5000")
-    return _conn_obj
+    """每个线程一个连接（多人同时提问时，共用一个连接写日志会互相干扰）。"""
+    c = getattr(_tls, "conn", None)
+    if c is None:
+        try:
+            import pysqlite3 as sqlite3  # 与 fulltext 一致，优先 pysqlite3
+        except Exception:
+            import sqlite3
+        c = sqlite3.connect(_db_path(), check_same_thread=False, timeout=10)
+        c.execute("PRAGMA busy_timeout=5000")
+        _tls.conn = c
+    return c
 
 
 def ensure_tables() -> None:

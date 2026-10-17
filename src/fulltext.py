@@ -29,17 +29,23 @@ load_dotenv()
 
 _db_path = os.getenv("FTS_DB_PATH", "./data/fts.db")
 _conn: Optional[sqlite3.Connection] = None
+# 每个线程一个连接（2026-10-17）：网页放开多人同时提问后，几个线程共用一个 sqlite 连接会互相干扰
+import threading
+_tls = threading.local()
+_init_path: Optional[str] = None
 
 _CJK_RE = re.compile(r'[\u4e00-\u9fff\u3040-\u30ff]')
 
 
 def init_fts(db_path: str = None) -> sqlite3.Connection:
     """初始化 FTS5 数据库，返回连接"""
-    global _conn
-    db_path = db_path or _db_path
+    global _conn, _init_path
+    db_path = db_path or _init_path or _db_path
+    _init_path = db_path
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    _conn = sqlite3.connect(db_path, check_same_thread=False)
+    _conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)   # 写锁最多等 30 秒，不直接报错
+    _tls.conn = _conn
     _conn.execute("""
         CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
             doc_id, doc_name, doc_type, machine_model, section_title, text,
@@ -61,9 +67,10 @@ def init_fts(db_path: str = None) -> sqlite3.Connection:
 
 
 def _get_conn() -> sqlite3.Connection:
-    if _conn is None:
+    c = getattr(_tls, "conn", None)
+    if c is None:
         return init_fts()
-    return _conn
+    return c
 
 
 def ingest_fts(

@@ -76,6 +76,11 @@ def _hint(doc: str) -> str:
     return "看原文判断"
 
 
+def _norm(text: str) -> str:
+    """比内容用：去掉空白和 markdown 符号（同一份资料转了两次格式，空格换行常常不一样）。"""
+    return re.sub(r"[\s*#_|>`-]+", "", text or "")
+
+
 def _conn():
     c = ts_table._conn()
     c.execute("CREATE TABLE IF NOT EXISTS kb_windows (hash TEXT PRIMARY KEY, kind TEXT, src_doc TEXT, n INTEGER, done_at TEXT)")
@@ -208,8 +213,9 @@ def run_oem(deadline: float, log=print) -> dict:
     for doc, machine, text, first, score in oem_windows():
         if time.time() > deadline:
             break
-        h = hashlib.md5(("oem" + doc + text).encode()).hexdigest()
-        if c.execute("SELECT 1 FROM kb_windows WHERE hash=?", (h,)).fetchone():
+        h = hashlib.md5(("oem" + doc + text).encode()).hexdigest()          # 老算法（资料名 + 内容），认旧记录用
+        hc = "c:" + hashlib.md5(("oem" + _norm(text)).encode()).hexdigest()  # 只看内容：不同资料里一样的段落只做一次
+        if c.execute("SELECT 1 FROM kb_windows WHERE hash IN (?, ?)", (h, hc)).fetchone():
             st["skipped"] += 1
             continue
         ok, why = local_llm.available()
@@ -224,7 +230,7 @@ def run_oem(deadline: float, log=print) -> dict:
             log(f"  ⚠️ {doc[:40]} 抽取失败：{type(ex).__name__}: {ex}")
             continue
         n = sum(1 for it in (out if isinstance(out, list) else []) if isinstance(it, dict) and _add_oem(c, doc, machine, it))
-        c.execute("INSERT OR REPLACE INTO kb_windows VALUES (?,?,?,?,?)", (h, "oem", doc, n, ts_table._now()))
+        c.execute("INSERT OR REPLACE INTO kb_windows VALUES (?,?,?,?,?)", (hc, "oem", doc, n, ts_table._now()))
         c.commit()
         st["windows"] += 1
         st["items"] += n

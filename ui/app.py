@@ -1405,10 +1405,10 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
     nav_log.click(lambda: _switch_view("worklog"), None, _nav_out)
     nav_err.click(lambda: _switch_view("err"), None, _nav_out)
     nav_sop.click(lambda: _switch_view("sop"), None, _nav_out)
-    sop_btn.click(sop_query, [sop_q, sop_machine], [sop_msg, sop_pick])
-    sop_q.submit(sop_query, [sop_q, sop_machine], [sop_msg, sop_pick])
+    sop_btn.click(sop_query, [sop_q, sop_machine], [sop_msg, sop_pick], concurrency_limit=4, concurrency_id="sop")
+    sop_q.submit(sop_query, [sop_q, sop_machine], [sop_msg, sop_pick], concurrency_limit=4, concurrency_id="sop")
     sop_pick.change(sop_detail, [sop_pick], [sop_md]).then(lambda: "", None, [sop_org])
-    sop_org_btn.click(sop_organize, [sop_pick, sop_q], [sop_org])
+    sop_org_btn.click(sop_organize, [sop_pick, sop_q], [sop_org], concurrency_limit=2, concurrency_id="sop_org")
     _ts_filters = [ts_f_machine, ts_f_unit, ts_f_status, ts_f_kw, ts_f_origin]
     nav_ts.click(lambda: _switch_view("ts"), None, _nav_out).then(ts_query, _ts_filters, [ts_msg, ts_df, ts_pick])
     ts_btn.click(ts_query, _ts_filters, [ts_msg, ts_df, ts_pick])
@@ -1442,10 +1442,13 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
     new_btn.click(lambda: _switch_view("chat") + [[], "", ""],
                   None, _nav_out + [chatbot, question, citation_buttons])
 
+    # 多人同时提问：Gradio 默认每个事件同一时间只处理一个（后来的人排队等前一个答完）。
+    # 回答时最慢的是云端模型 / 向量化，服务器主要在等，放到同时 CHAT_CONCURRENCY 个（默认 3），两个入口共用名额
+    _chat_conc = dict(concurrency_limit=int(os.getenv("CHAT_CONCURRENCY", "3")), concurrency_id="chat")
     send_btn.click(chat, [question, chatbot], [chatbot, question, citation_buttons],
-                    show_progress="hidden")   # Gradio 默认加载遮罩会把对话框整个盖住，流式内容和状态行都看不见
+                    show_progress="hidden", **_chat_conc)   # Gradio 默认加载遮罩会把对话框整个盖住，流式内容和状态行都看不见
     question.submit(chat, [question, chatbot], [chatbot, question, citation_buttons],
-                    show_progress="hidden")   # Gradio 默认加载遮罩会把对话框整个盖住，流式内容和状态行都看不见
+                    show_progress="hidden", **_chat_conc)   # Gradio 默认加载遮罩会把对话框整个盖住，流式内容和状态行都看不见
     provider_dropdown.change(do_switch_provider, [provider_dropdown], [model_dropdown, switch_status])
     switch_btn.click(do_apply_model, [provider_dropdown, model_dropdown], [switch_status])
 

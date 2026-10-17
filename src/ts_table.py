@@ -425,8 +425,9 @@ def run(limit: int = 0, only_doc: str = None, log=print) -> dict:
     c = _conn()
     stat = {"windows": 0, "skipped": 0, "cases": 0, "entries": set()}
     for src_doc, machine, cust, text, section in source_windows(only_doc):
-        h = hashlib.md5((src_doc + text).encode()).hexdigest()
-        if c.execute("SELECT 1 FROM ts_windows WHERE hash=?", (h,)).fetchone():
+        h = hashlib.md5((src_doc + text).encode()).hexdigest()               # 老算法，认旧记录用
+        hc = "c:" + hashlib.md5(re.sub(r"[\s*#_|>`-]+", "", text).encode()).hexdigest()   # 只看内容
+        if c.execute("SELECT 1 FROM ts_windows WHERE hash IN (?, ?)", (h, hc)).fetchone():
             stat["skipped"] += 1
             continue
         if limit and stat["windows"] >= limit:
@@ -444,7 +445,7 @@ def run(limit: int = 0, only_doc: str = None, log=print) -> dict:
                 n_new += 1
                 stat["entries"].add(eid)
         c.execute("INSERT OR REPLACE INTO ts_windows(hash, src_doc, n_cases, done_at) VALUES (?,?,?,?)",
-                  (h, src_doc, len(cases), _now()))
+                  (hc, src_doc, len(cases), _now()))
         c.commit()
         stat["cases"] += n_new
         log(f"  {src_doc[:36]:36s} {section[:28]:28s} → {len(cases)} 条（新 {n_new}）")
