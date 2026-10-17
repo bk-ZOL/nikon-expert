@@ -6,7 +6,7 @@
 
 | 项 | 说明 |
 |---|---|
-| 本地仓库 | `/Users/jayce/nikon-expert`，分支 `feat/feishu-worklog`（main 落后很多，还没合并） |
+| 本地仓库 | `/Users/jayce/nikon-expert`，开发分支 `feat/feishu-worklog`，改完开 PR 合并进 `main`（2026-10-17 PR #5 后两边一致） |
 | 服务器 | Vultr，AlmaLinux 8，3.6G 内存，**纯 CPU**。经 Tailscale 访问：`root@100.93.22.104`，项目在 `/opt/nikon-expert`（**不是 git 仓库**） |
 | ssh 写法 | `env -u ALL_PROXY -u all_proxy ssh root@100.93.22.104 ...`（本机有 Clash 代理，不去掉会连不上） |
 | 服务 | `nikon-expert.service`（Gradio 网页，端口 7860）、`nikon-mcp.service`（MCP，streamable-http） |
