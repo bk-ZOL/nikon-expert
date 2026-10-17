@@ -1,0 +1,11 @@
+[Unit]
+Description=Nikon Expert Troubleshooting 表：从履历/日志/客户报告抽取新案例并归并（只处理新增/改过的内容）
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/nikon-expert
+Environment=PYTHONUNBUFFERED=1
+Nice=10
+ExecStart=/opt/nikon-expert/.venv/bin/python /opt/nikon-expert/scripts/ts_extract.py
+TimeoutStartSec=infinity

@@ -18,6 +18,8 @@ import os
 PROXY = os.getenv("LLM_PROXY", "socks5h://127.0.0.1:7890")
 
 REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "180"))
+# 流式 chunk 间的最大空闲（读超时）：卡住这么久就报错释放，避免无限挂起。
+READ_TIMEOUT = float(os.getenv("LLM_READ_TIMEOUT", "45"))
 CLOUD_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096"))
 
 
@@ -152,8 +154,11 @@ def _httpx_clients(use_proxy: bool):
     import httpx
     # PROXY 为空（如墙外服务器）时直连，不走代理
     proxy = PROXY if (use_proxy and PROXY) else None
-    sync = httpx.Client(proxy=proxy, trust_env=False, timeout=REQUEST_TIMEOUT)
-    asyncc = httpx.AsyncClient(proxy=proxy, trust_env=False, timeout=REQUEST_TIMEOUT)
+    # 分项超时：连接 10s，读(chunk 间空闲) READ_TIMEOUT，写 30s，连接池 10s。
+    # 读超时是流式关键——中途停顿超过它就抛 ReadTimeout，不再无限挂起。
+    to = httpx.Timeout(REQUEST_TIMEOUT, connect=10.0, read=READ_TIMEOUT, write=30.0, pool=10.0)
+    sync = httpx.Client(proxy=proxy, trust_env=False, timeout=to)
+    asyncc = httpx.AsyncClient(proxy=proxy, trust_env=False, timeout=to)
     return sync, asyncc
 
 
@@ -188,7 +193,13 @@ def build_llm(provider_id: str, model: str):
         # 用 OpenAILike：不校验模型名是否属于 OpenAI 官方列表，适配各家兼容接口。
         from llama_index.llms.openai_like import OpenAILike
         sync, asyncc = _httpx_clients(p["use_proxy"])
+        extra = {}
+        if provider_id == "deepseek" and os.getenv("DEEPSEEK_THINKING", "off").lower() in ("off", "0", "false", "no"):
+            # deepseek-v4 默认每一步先在后台长时间「思考」（不显示），智能体第一步常要 30~90 秒，网页上像卡住。
+            # 智能体本来就把推理写在 Thought 里，后台思考是重复的，默认关掉（2026-10-17）。DEEPSEEK_THINKING=on 打开
+            extra = {"extra_body": {"thinking": {"type": "disabled"}}}
         return OpenAILike(
+            additional_kwargs=extra,
             model=model,
             api_base=p["base_url"],
             api_key=key,

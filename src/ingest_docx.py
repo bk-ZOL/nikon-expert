@@ -13,7 +13,7 @@ load_dotenv()
 from src.ingestor import (
     _doc_id, _chunk_hash, _get_storage,
     _delete_existing, _fts_sync, _fts_delete_by_name,
-    _split_by_headings,
+    _split_by_headings, office_image_ocr,
 )
 
 
@@ -46,22 +46,44 @@ def ingest_docx(
     print(f"\n📄 摄入 docx：{path.name}")
 
     text = docx_to_markdown(str(path))
-    if not text or len(text) < 10:
+    ocr = office_image_ocr(path, len(text or ""))      # 正文很少的（内容是截图）：截图 OCR
+    return ingest_markdown(text, path.name, str(path), doc_type=doc_type, machine_model=machine_model,
+                           language=language, extra_sections=ocr)
+
+
+def ingest_markdown(
+    text: str,
+    doc_name: str,
+    file_path: str = "",
+    doc_type: str = "sop",
+    machine_model: str = "",
+    language: str = "zh",
+    extra_sections: list = None,
+    doc_key: str = None,
+) -> int:
+    """markdown 正文按标题切块，写向量库 + 全文索引（同名旧数据先删）。返回 chunk 数。
+    docx 和飞书文档共用。doc_key 决定 doc_id（默认用 file_path）。"""
+    from llama_index.core import VectorStoreIndex, Document
+    from llama_index.core.node_parser import SentenceSplitter
+
+    ocr = extra_sections or []
+    if (not text or len(text) < 10) and not ocr:
         print("  ⚠️  未提取到文本，跳过")
         return 0
 
     vs, ctx, qdrant_client = _get_storage()
     collection = os.getenv("COLLECTION_NAME", "nikon_expert_v1")
 
-    rid = _doc_id(str(path))
-    doc_name = path.name
+    rid = _doc_id(doc_key or file_path or doc_name)
+    path = file_path
 
     # 去重：先删旧数据
     _delete_existing(qdrant_client, collection, doc_name)
     _fts_delete_by_name(doc_name)
 
     parent_chunk_size = int(os.getenv("PARENT_CHUNK_SIZE", "1024"))
-    sections = _split_by_headings(text, max_chunk=parent_chunk_size)
+    sections = _split_by_headings(text, max_chunk=parent_chunk_size) if text and len(text) >= 10 else []
+    sections += ocr
 
     docs = []
     for sec_title, sec_text in sections:
@@ -74,7 +96,7 @@ def ingest_docx(
                 "doc_name":      doc_name,
                 "doc_type":      doc_type,
                 "language":      language,
-                "file_path":     str(path),
+                "file_path":     path,
                 "machine_model": machine_model,
                 "doc_id":        rid,
                 "chunk_hash":    _chunk_hash(sec_text),
@@ -82,7 +104,7 @@ def ingest_docx(
             },
         ))
         # FTS 同步（双写）
-        _fts_sync(rid, doc_name, doc_type, machine_model, title, sec_text, str(path))
+        _fts_sync(rid, doc_name, doc_type, machine_model, title, sec_text, path)
 
     if not docs:
         qdrant_client.close()

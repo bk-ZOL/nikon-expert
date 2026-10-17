@@ -97,6 +97,20 @@ _UNDOWNLOADABLE = object()
 INGESTABLE_SUFFIXES = {".docx", ".pdf", ".md", ".xlsx", ".csv", ".txt"}
 # 超过此大小不下载（视频等），单位 MB
 MAX_FILE_MB = float(os.getenv("MAX_FILE_MB", "50"))
+MAX_DOC_MB = float(os.getenv("MAX_DOC_MB", "300"))   # 可摄入文档的上限；MAX_FILE_MB 只管视频等
+MAX_FAILS = int(os.getenv("SYNC_MAX_FAILS", "3"))      # 同一版本连续失败几次后放弃
+MAX_DELETE = int(os.getenv("SYNC_MAX_DELETE", "20"))   # 单轮删除上限，超了视为异常不删
+SKIP_PATH_KEYWORDS = ("［Driver］",)
+SKIP_TITLES = {t for t in os.getenv("SYNC_SKIP_TITLES",
+               "SE306(FSE &Training+Manual)").split("|") if t}  # 已手工切分入库的原件
+CHUNKED_SUFFIXES = {".pdf", ".docx", ".xlsx", ".csv"}  # 入库后可在 Qdrant 回查 chunk 的类型
+COLLECTION = os.getenv("QDRANT_COLLECTION", "nikon_expert_v1")
+KNOWN_EXTS = ['.7z', '.csv', '.doc', '.docx', '.gif', '.jpeg', '.jpg', '.md', '.mov', '.mp4', '.pdf', '.png', '.ppt', '.pptx', '.rar', '.txt', '.xls', '.xlsx', '.zip']
+import re as _re
+SKIP_TITLE_PATTERNS = [  # 同一套资料的重复版本；S207DS307E 电路图库里只留"已融合"版
+    r"^S207DS307E Electrical Circuit Diagram Rev\. 1\.0 \(Volume \d ?of 5\)(?!-已融合)",
+    r"^S307E-RF-ELCIRC-R10-B1-\d",
+]
 
 
 def sniff_ext(path: Path) -> str:
@@ -271,6 +285,10 @@ def _ensure_embed():
     if _embed_ready[0]:
         return
     from llama_index.core import Settings
+    if Settings._embed_model is None and os.getenv("EMBED_API_KEY", "").strip():
+        from src.api_embedding import APIEmbedding  # 与 MCP 查询同一个云端 bge-m3，不吃本地 CPU
+        Settings.embed_model = APIEmbedding()
+        print(f"⚙️  入库 Embedding：云端 API（{Settings.embed_model.model_name}）")
     if Settings._embed_model is None:
         from llama_index.embeddings.huggingface import HuggingFaceEmbedding
         from src.device import get_device
@@ -292,23 +310,76 @@ def map_dir(rel_path: str):
     return ("manual", True)  # 未知目录默认当 manual 同步
 
 
+def _convert_legacy_office(path: Path, suffix: str):
+    """扩展名是 .xlsx/.docx、实际却是老 Office(OLE) 的文件，用 LibreOffice 转成新格式。
+    转换结果放临时目录、文件名不变，doc_name / ACL / chunk 回查都不受影响。"""
+    if suffix not in (".xlsx", ".docx"):
+        return path
+    try:
+        if path.open("rb").read(4) != b"\xd0\xcf\x11\xe0":
+            return path
+    except Exception:
+        return path
+    import subprocess, tempfile, shutil
+    tmp = Path(tempfile.mkdtemp(prefix="legacy_"))
+    src = tmp / (path.stem + (".xls" if suffix == ".xlsx" else ".doc"))
+    shutil.copy(path, src)
+    # 指定导入格式：文件坏了就转换失败；不指定的话 LibreOffice 会退回"按文本导入"，把二进制当内容（出过 13005 段乱码）
+    infilter = "MS Excel 97" if suffix == ".xlsx" else "MS Word 97"
+    r = subprocess.run(["soffice", "--headless", f"--infilter={infilter}", "--convert-to", suffix[1:],
+                        "--outdir", str(tmp), str(src)],
+                       capture_output=True, text=True, timeout=600)
+    out = tmp / path.name
+    if not out.exists():
+        raise RuntimeError("LibreOffice 转换失败: " + (r.stderr or r.stdout).strip()[:200])
+    print(f"    ↻ 老格式已转换为 {suffix}: {path.name}")
+    return out
+
+
+def _model_for(path: Path) -> str:
+    """推断机型标签：先读内容（封面、文档编号、正文出现次数），判断不出来再按 WPS 镜像路径 + 文件名。"""
+    from src.machine_model import infer_model_for_file, mirror_paths
+    tag, why = infer_model_for_file(path, mirror_paths(MIRROR, path.name), path.name)
+    print(f"    机型 {tag}（{why}）")
+    return tag
+
+
 def ingest_dispatch(local_path: Path, doc_type: str):
     """按后缀 + doc_type 分发到现有摄入管线。"""
+    from src.ingest_error_text import is_error_text, ingest_error_text
+    if is_error_text(local_path):               # 错误信息原文（没有扩展名）：每个错误码一条全文记录
+        ingest_error_text(local_path, machine_model=_model_for(local_path))
+        try:
+            from src.acl_classify import apply_doc_acl
+            apply_doc_acl(local_path.name)
+        except Exception:
+            pass
+        return
     _ensure_embed()
     suffix = local_path.suffix.lower()
+    local_path = _convert_legacy_office(local_path, suffix)  # 老 .xls/.doc 先转换
+    model = _model_for(local_path)
     if suffix == ".docx":
         from src.ingest_docx import ingest_docx
-        ingest_docx(str(local_path), doc_type=doc_type, machine_model=MACHINE_MODEL)
+        ingest_docx(str(local_path), doc_type=doc_type, machine_model=model)
     elif suffix == ".pdf":
-        from src.ingestor import ingest_pdf
-        ingest_pdf(str(local_path), machine_model=MACHINE_MODEL, language="zh")
+        if "circuit diagram" in local_path.name.lower():
+            from src.ingestor import ingest_circuit_pdf
+            ingest_circuit_pdf(str(local_path), machine_model=model)
+            # 入库只取文字层（CIRCUIT_OCR=0）；OCR + 矢量字形识读交给后台任务，它会等同步结束再开始
+            import subprocess
+            subprocess.run(["systemctl", "start", "--no-block", "nikon-circuit-recognize.service"], check=False)
+            print("    ↳ 已启动后台识图任务 nikon-circuit-recognize")
+        else:
+            from src.ingestor import ingest_pdf
+            ingest_pdf(str(local_path), machine_model=model, language="zh")
     elif suffix in (".xlsx", ".csv"):
         if doc_type == "fault_history":
             from src.ingestor import ingest_fault_history
             ingest_fault_history(str(local_path))
         else:
             from src.ingestor import ingest_excel
-            ingest_excel(str(local_path), machine_model=MACHINE_MODEL)
+            ingest_excel(str(local_path), machine_model=model)
     elif suffix in (".md", ".txt"):
         from src.fulltext import index_directory
         index_directory(str(local_path.parent), pattern=local_path.name,
@@ -340,6 +411,23 @@ def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=1))
 
 
+def _qdrant():
+    from qdrant_client import QdrantClient
+    return QdrantClient(url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333"))
+
+
+def _kb_count(qc, doc_name: str) -> int:
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    f = Filter(must=[FieldCondition(key="doc_name", match=MatchValue(value=doc_name))])
+    return qc.count(COLLECTION, count_filter=f, exact=True).count
+
+
+def _delete_doc(qc, doc_name: str):
+    """向量库 + FTS 一起删（_delete_existing 已含 FTS 删除）"""
+    from src.ingestor import _delete_existing
+    _delete_existing(qc, COLLECTION, doc_name)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--probe", action="store_true",
@@ -347,21 +435,45 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="只列出计划，不下载不摄入")
     ap.add_argument("--no-ingest", action="store_true", help="只镜像，不摄入")
     ap.add_argument("--reingest", action="store_true",
-                    help="不下载，直接把本地镜像里的文件全部重新摄入"
-                         "（摄入曾失败时用）")
+                    help="不下载，直接把本地镜像里的文件全部重新摄入（摄入曾失败时用）")
     ap.add_argument("--force", action="store_true", help="忽略状态，全量重新下载")
+    ap.add_argument("--suffix", default="",
+                    help="配合 --reingest：只重新摄入这种后缀的文件（如 .xlsx），同名只做一次，跳过故障履历目录")
+    ap.add_argument("--names", default="",
+                    help="配合 --reingest：只重新摄入名单文件（每行一个文件名）里的文件，同名只做一次")
+    ap.add_argument("--legacy", action="store_true",
+                    help="配合 --reingest：只重新摄入老 Office 格式（扩展名 .xlsx/.docx、实际是 OLE）的文件，同名只做一次。"
+                         "这批文件在加转换逻辑之前已被记成已同步，WPS 里不改就不会重跑")
     args = ap.parse_args()
 
     if args.reingest:
         if not MIRROR.exists():
             sys.exit(f"镜像目录不存在: {MIRROR}")
         stats = {"ingested": 0, "failed": 0, "skipped": 0}
+        done = set()
+        only = {l.strip() for l in Path(args.names).read_text().splitlines() if l.strip()} if args.names else None
         for p in sorted(MIRROR.rglob("*")):
             if not p.is_file() or p.name.startswith("."):
                 continue
             if p.suffix.lower() not in INGESTABLE_SUFFIXES:
                 stats["skipped"] += 1
                 continue
+            if only is not None:
+                if p.name not in only or p.name in done or "［Driver］" in str(p):
+                    continue
+                done.add(p.name)
+            if args.suffix:
+                if p.suffix.lower() != args.suffix.lower() or "［Driver］" in str(p) or p.name in done \
+                        or map_dir(str(p.relative_to(MIRROR)))[0] == "fault_history":
+                    continue
+                done.add(p.name)
+            if args.legacy:
+                if "［Driver］" in str(p) or p.name in done or p.suffix.lower() not in (".xlsx", ".docx"):
+                    continue
+                with open(p, "rb") as fh:
+                    if fh.read(4) != b"\xd0\xcf\x11\xe0":
+                        continue
+                done.add(p.name)
             doc_type, _ = map_dir(str(p.relative_to(MIRROR)))
             print(f"  ⚙  {p.relative_to(MIRROR)}  [{doc_type}]")
             try:
@@ -389,8 +501,11 @@ def main():
     print(f"共 {len(files)} 个文件")
 
     state = {} if args.force else load_state()
-    stats = {"synced": 0, "skipped_dir": 0, "skipped_undownloadable": 0,
-             "unchanged": 0, "failed": 0, "ingested": 0}
+    stats = {"synced": 0, "skipped_dir": 0, "skipped_rule": 0,
+             "skipped_undownloadable": 0, "unchanged": 0, "failed": 0,
+             "ingested": 0, "ingest_failed": 0, "gave_up": 0,
+             "renamed": 0, "deleted": 0}
+    qc = None if (args.dry_run or args.no_ingest) else _qdrant()
 
     for f in files:
         doc_type, should_sync = map_dir(f["rel_path"])
@@ -399,18 +514,29 @@ def main():
         if not should_sync:
             stats["skipped_dir"] += 1
             continue
+        if any(k in label for k in SKIP_PATH_KEYWORDS) or f["title"] in SKIP_TITLES or any(_re.search(r, f["title"]) for r in SKIP_TITLE_PATTERNS) or any(_re.search(r, f["title"]) for r in SKIP_TITLE_PATTERNS) \
+                or any(_re.search(r, f["title"]) for r in SKIP_TITLE_PATTERNS):
+            stats["skipped_rule"] += 1
+            continue
         if f["doc_type"] in UNDOWNLOADABLE:
             print(f"  ⏭  OTL 智能文档无法下载: {label}")
             stats["skipped_undownloadable"] += 1
             continue
 
         prev = state.get(f["kuid"], {})
-        if f["token"] and prev.get("token") == f["token"] and not args.force:
-            stats["unchanged"] += 1
-            continue
+        same_ver = bool(f["token"]) and prev.get("token") == f["token"]
+        if same_ver and not args.force:
+            if prev.get("fails", 0) >= MAX_FAILS:
+                stats["gave_up"] += 1
+                continue
+            if not prev.get("fails") and not prev.get("retry") and prev.get("sha") != "oversize":
+                stats["unchanged"] += 1
+                continue
+            # 走到这里 = 上次摄入失败，或旧规则下被判超大 → 重试
 
         dest = MIRROR / f["rel_path"] / f["title"]
-        print(f"  ⬇  {label}  [{doc_type}]")
+        retry = f"（重试，已失败 {prev['fails']} 次）" if prev.get("fails") else ""
+        print(f"  ⬇  {label}  [{doc_type}]{retry}")
         if args.dry_run:
             stats["synced"] += 1
             continue
@@ -423,19 +549,8 @@ def main():
             stats["failed"] += 1
             continue
 
-        # 大文件（视频等）直接删掉不留镜像，也不摄入
-        size_mb = dest.stat().st_size / 1024 / 1024
-        if size_mb > MAX_FILE_MB:
-            print(f"    ⏭  {size_mb:.0f}MB 超过上限 {MAX_FILE_MB:.0f}MB，跳过: {dest.name}")
-            dest.unlink()
-            state[f["kuid"]] = {"title": f["title"], "token": f["token"],
-                                "sha": "oversize", "synced_at": time.strftime("%F %T")}
-            save_state(state)
-            stats["skipped_oversize"] = stats.get("skipped_oversize", 0) + 1
-            continue
-
         # 无扩展名的未知类型：按魔数补名，让后缀分发能接住
-        if not dest.suffix:
+        if dest.suffix.lower() not in KNOWN_EXTS:  # 标题带点(Rev. 2.0)会被误当扩展名
             ext = sniff_ext(dest)
             if ext:
                 new_dest = dest.with_name(dest.name + ext)
@@ -443,26 +558,80 @@ def main():
                 dest = new_dest
                 print(f"    ↳ 识别为 {ext}: {dest.name}")
 
+        from src.ingest_error_text import is_error_text
+        ingestable = dest.suffix.lower() in INGESTABLE_SUFFIXES or is_error_text(dest)   # e_st_0540 等错误信息原文
+        size_mb = dest.stat().st_size / 1024 / 1024
+        limit = MAX_DOC_MB if ingestable else MAX_FILE_MB
+        if size_mb > limit:
+            print(f"    ⏭  {size_mb:.0f}MB 超过上限 {limit:.0f}MB，跳过: {dest.name}")
+            dest.unlink()
+            state[f["kuid"]] = {"title": f["title"], "token": f["token"],
+                                "sha": "oversize_v2", "synced_at": time.strftime("%F %T")}
+            save_state(state)
+            stats["skipped_oversize"] = stats.get("skipped_oversize", 0) + 1
+            continue
+
         sha = hashlib.sha256(dest.read_bytes()).hexdigest()[:16]
-        content_changed = sha != prev.get("sha")
-        state[f["kuid"]] = {"title": f["title"], "token": f["token"],
-                            "sha": sha, "synced_at": time.strftime("%F %T")}
+        old_name = prev.get("doc_name") or prev.get("title")
+        renamed = bool(old_name) and old_name != dest.name
+        entry = {"title": f["title"], "token": f["token"], "sha": sha,
+                 "doc_name": dest.name, "synced_at": time.strftime("%F %T")}
         stats["synced"] += 1
 
-        if content_changed and not args.no_ingest \
-                and dest.suffix.lower() in INGESTABLE_SUFFIXES:
+        if (sha != prev.get("sha") or renamed) and not args.no_ingest and ingestable:
             try:
                 ingest_dispatch(dest, doc_type)
+                if dest.suffix.lower() in CHUNKED_SUFFIXES \
+                        and "circuit diagram" not in dest.name.lower() \
+                        and _kb_count(qc, dest.name) == 0:
+                    raise RuntimeError("入库后 0 个 chunk（多半是纯图片、没有可读文字）")
                 stats["ingested"] += 1
+                if renamed:
+                    _delete_doc(qc, old_name)
+                    stats["renamed"] += 1
+                    print(f"    ↻  改名：已删除旧文档 {old_name}")
             except Exception as e:
-                print(f"    ⚠️  摄入失败 {dest.name}: {e}")
+                fails = prev.get("fails", 0) + 1 if same_ver else 1
+                print(f"    ⚠️  摄入失败（第 {fails} 次）{dest.name}: {e}")
+                entry.update(sha=None, fails=fails, last_error=str(e)[:200])
+                stats["ingest_failed"] += 1
 
+        state[f["kuid"]] = entry
         save_state(state)  # 每个文件存一次，天然断点续传
+
+    # WPS 里已删除的 → 库里同步删除（带上限保护）
+    if qc is not None:
+        seen = {f["kuid"] for f in files}
+        gone = [k for k in state if k not in seen]
+        if gone:
+            if not files or len(gone) > MAX_DELETE:
+                print(f"\n⚠️  有 {len(gone)} 个文件在 WPS 里找不到，超过单轮上限 {MAX_DELETE}，"
+                      f"可能是遍历出错，本轮不删。确认无误后临时调大 SYNC_MAX_DELETE 再跑。")
+            else:
+                for k in gone:
+                    v = state.pop(k)
+                    name = v.get("doc_name") or v.get("title")
+                    if name and v.get("sha") not in (None, "oversize", "oversize_v2"):
+                        _delete_doc(qc, name)
+                        print(f"  🗑  WPS 已删除，库里同步删除: {name}")
+                    stats["deleted"] += 1
+                save_state(state)
 
     print("\n" + "=" * 50)
     for k, v in stats.items():
         print(f"  {k}: {v}")
     print(f"  镜像目录: {MIRROR.resolve()}")
+
+    # 有资料入库 / 删除 → 刷新 SOP 目录（只重算内容变了的流程的向量，几秒到几十秒）
+    if stats.get("ingested") or stats.get("deleted") or stats.get("renamed"):
+        try:
+            from src import sop_index
+            print("\n刷新 SOP 目录 ...")
+            print(" ", sop_index.build(log=lambda m: print("  " + m)))
+            from src import glossary
+            glossary.build(log=lambda m: print("  " + m))
+        except Exception as e:
+            print(f"  ⚠️  SOP 目录刷新失败（不影响同步）: {e}")
 
 
 if __name__ == "__main__":

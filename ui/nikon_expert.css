@@ -58,6 +58,11 @@ footer { display: none !important; }
 
 /* ── 对话区:居中一栏 ───────────────────────────────────── */
 .chatbot, .bubble-wrap { background: transparent !important; border: none !important; }
+/* 隐藏 Gradio 聊天区自带的 分享/清空/复制 工具(preview 没有,保持干净) */
+.chatbot .icon-button-wrapper,
+.chatbot .message-buttons,
+.chatbot .message-buttons-left,
+.icon-button-wrapper.top-panel { display: none !important; }
 .chatbot .message-wrap, .chatbot .bubble-wrap {
   max-width: var(--nk-col) !important; margin: 0 auto !important;
 }
@@ -107,7 +112,9 @@ footer { display: none !important; }
 #nk-inputrow textarea:focus { box-shadow: none !important; }
 /* 发送键:陶土色小圆钮 */
 #nk-send button, #nk-send {
-  min-width: 38px !important; width: 38px; height: 38px; border-radius: 50% !important;
+  /* 固定 38px：按 scale 比例分宽度时，版面一宽就被拉成扁椭圆 */
+  flex: 0 0 38px !important; min-width: 38px !important; max-width: 38px !important;
+  width: 38px !important; height: 38px; border-radius: 50% !important; align-self: flex-end;
   padding: 0 !important; font-size: 1rem !important; line-height: 1;
 }
 
@@ -169,7 +176,12 @@ footer { display: none !important; }
   background: var(--nk-bg) !important;
   border-right: 1px solid var(--nk-line) !important;
   padding: 0 !important;
+  /* 收/展平滑过渡:宽度慢慢变(两态都生效) */
+  transition: width .24s ease, min-width .24s ease, max-width .24s ease !important;
+  overflow: hidden !important;
 }
+/* 展开态显式锁定宽度,作为过渡的另一端 */
+#nk-side-wrap.sidebar.open{ width:280px !important; min-width:280px !important; max-width:280px !important; }
 #nk-side {
   display: flex; flex-direction: column; height: 100%;
   padding: 14px 12px; gap: 4px; box-sizing: border-box;
@@ -213,11 +225,13 @@ footer { display: none !important; }
   color: var(--nk-ink-faint); padding: 4px 11px 6px; font-weight: 600;
 }
 #nk-side .nk-recent-item {
+  display: block; text-align: left;   /* 防止 gradio HTML 容器把文字居中 */
   padding: 7px 11px; border-radius: 8px; cursor: pointer;
   color: var(--nk-ink-soft); font-size: .82rem; text-decoration: none;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   transition: background .12s ease;
 }
+#nk-side, #nk-side .nk-recent, #nk-side .nk-recent-head { text-align: left; }
 #nk-side .nk-recent-item:hover { background: rgba(0,0,0,.04); color: var(--nk-ink); }
 .dark #nk-side .nk-recent-item:hover { background: rgba(255,255,255,.05); }
 
@@ -291,6 +305,62 @@ footer { display: none !important; }
   box-shadow: none !important;
 }
 #nk-side-wrap button.nk-newbtn:hover { border-color: var(--nk-clay) !important; }
+
+/* 导航线条图标(mask 注入,不用 emoji;颜色随文字,active 变陶土色) */
+#nk-side-wrap button.nk-navbtn::before,
+#nk-side-wrap button.nk-newbtn::before {
+  content: ""; flex: 0 0 17px; width: 17px; height: 17px; display: inline-block;
+  background-color: currentColor;
+  -webkit-mask: var(--nk-ic) center / contain no-repeat;
+  mask: var(--nk-ic) center / contain no-repeat;
+}
+#nk-side-wrap button.nk-newbtn::before { width: 16px; height: 16px; flex-basis: 16px; color: var(--nk-clay); }
+.nk-ic-chat{--nk-ic:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M21%2015a2%202%200%200%201-2%202H7l-4%204V5a2%202%200%200%201%202-2h14a2%202%200%200%201%202%202z%22%2F%3E%3C%2Fsvg%3E");}
+.nk-ic-kb{--nk-ic:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M4%2019.5A2.5%202.5%200%200%201%206.5%2017H20%22%2F%3E%3Cpath%20d%3D%22M6.5%202H20v20H6.5A2.5%202.5%200%200%201%204%2019.5v-15A2.5%202.5%200%200%201%206.5%202z%22%2F%3E%3C%2Fsvg%3E");}
+.nk-ic-log{--nk-ic:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M9%205H7a2%202%200%200%200-2%202v12a2%202%200%200%200%202%202h10a2%202%200%200%200%202-2V7a2%202%200%200%200-2-2h-2%22%2F%3E%3Crect%20x%3D%229%22%20y%3D%223%22%20width%3D%226%22%20height%3D%224%22%20rx%3D%221%22%2F%3E%3Cpath%20d%3D%22M9%2012h6M9%2016h4%22%2F%3E%3C%2Fsvg%3E");}
+.nk-ic-err{--nk-ic:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M10.3%203.9%201.8%2018a2%202%200%200%200%201.7%203h17a2%202%200%200%200%201.7-3L13.7%203.9a2%202%200%200%200-3.4%200z%22%2F%3E%3Cpath%20d%3D%22M12%209v4M12%2017h.01%22%2F%3E%3C%2Fsvg%3E");}
+.nk-ic-ts{--nk-ic:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M14.7%206.3a4%204%200%200%200-5.4%205.2L3.6%2017.2a1.6%201.6%200%200%200%202.3%202.3l5.7-5.7a4%204%200%200%200%205.2-5.4l-2.4%202.4-2.1-.6-.6-2.1z%22%2F%3E%3C%2Fsvg%3E");}
+.nk-ic-sop{--nk-ic:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M9%206h11M9%2012h11M9%2018h11%22%2F%3E%3Cpath%20d%3D%22M4%206l1%201%202-2M4%2012l1%201%202-2M4%2018l1%201%202-2%22%2F%3E%3C%2Fsvg%3E");}
+.nk-ic-audit{--nk-ic:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M12%2022s8-4%208-10V5l-8-3-8%203v7c0%206%208%2010%208%2010z%22%2F%3E%3C%2Fsvg%3E");}
+.nk-ic-plus{--nk-ic:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M12%205v14M5%2012h14%22%2F%3E%3C%2Fsvg%3E");}
+
+/* ══ 折叠 = 图标栏(对齐 preview):Gradio 默认把侧栏滑出屏幕,这里改成缩成 64px 只留图标 ══ */
+#nk-side-wrap.sidebar:not(.open){
+  width:64px !important; min-width:64px !important; max-width:64px !important;
+  margin-left:0 !important; left:0 !important; right:auto !important; transform:none !important;
+  overflow:hidden !important;   /* 收起按钮已居中在 64px 内,不会被裁 */
+}
+/* 藏掉 Gradio 自带的三角折叠钮,改用 preview 的「面板图标」收起按钮(.nk-collapse) */
+#nk-side-wrap .toggle-button{ display:none !important; }
+#nk-side .nk-collapse{
+  margin-left:auto; width:28px; height:28px; flex:0 0 28px; display:inline-flex;
+  align-items:center; justify-content:center; border:none; background:transparent;
+  color:var(--nk-ink-faint); border-radius:7px; cursor:pointer; padding:0;
+  transition:background .12s ease, color .12s ease;
+}
+#nk-side .nk-collapse:hover{ background:rgba(0,0,0,.05); color:var(--nk-ink); }
+#nk-side .nk-collapse svg{ width:18px; height:18px; }
+/* 折叠态:品牌名+收起按钮都隐藏,只留 logo 居中;点 logo 展开 */
+#nk-side-wrap.sidebar:not(.open) .nk-side-top{ flex-direction:column !important; gap:8px !important; padding:8px 0 12px !important; }
+#nk-side-wrap.sidebar:not(.open) .nk-collapse{ display:none !important; }
+#nk-side-wrap.sidebar:not(.open) .nk-logobtn{ cursor:pointer; margin:0 auto !important; }
+/* logo 容器 */
+#nk-side .nk-logobtn{ display:inline-flex; align-items:center; }
+#nk-side-wrap.sidebar:not(.open) #nk-side{ padding-left:0 !important; padding-right:0 !important; }
+/* 折叠时隐藏所有文字类,只留图标/头像 */
+#nk-side-wrap.sidebar:not(.open) .nk-name,
+#nk-side-wrap.sidebar:not(.open) .nk-recent,
+#nk-side-wrap.sidebar:not(.open) .nk-acc-info,
+#nk-side-wrap.sidebar:not(.open) .nk-acc-more{ display:none !important; }
+/* 折叠时导航/新建按钮:文字收成 0,只剩居中的图标 */
+#nk-side-wrap.sidebar:not(.open) button.nk-navbtn,
+#nk-side-wrap.sidebar:not(.open) button.nk-newbtn{
+  font-size:0 !important; gap:0 !important; justify-content:center !important; padding:9px 0 !important; width:44px !important; margin:0 auto 2px !important;
+}
+#nk-side-wrap.sidebar:not(.open) button.nk-newbtn{ background:transparent !important; border:none !important; }
+/* 折叠时 logo 与头像居中 */
+#nk-side-wrap.sidebar:not(.open) .nk-side-top{ justify-content:center !important; padding:4px 0 12px !important; }
+#nk-side-wrap.sidebar:not(.open) .nk-account{ justify-content:center !important; padding:0 0 12px !important; }
 
 /* 视图:知识库 / 工作日志 / 错误码 */
 .nk-view { max-width: var(--nk-col); margin: 8px auto 0; }
@@ -369,3 +439,51 @@ button.nk-danger:hover { background: #FBF0EB !important; border-color: #B8634A !
 /* 顶栏左侧标语 */
 #nk-maintop { display: flex !important; align-items: center; justify-content: space-between !important; }
 #nk-maintop .nk-tagline { font-size: .78rem; color: var(--nk-ink-soft); }
+
+/* ══ 锁定浅色(对齐 preview:无论系统深浅,一律浅色 Claude 皮肤) ══ */
+.dark{
+  --nk-bg:#FAF9F5; --nk-surface:#FFFFFF; --nk-panel:#F0EEE6;
+  --nk-ink:#2B2B26; --nk-ink-soft:#84806F; --nk-ink-faint:#B0AB9C;
+  --nk-line:#E8E5DC; --nk-clay:#CC785C; --nk-clay-deep:#B8634A;
+  --nk-clay-soft:rgba(204,120,92,.10);
+}
+html, body, gradio-app, .gradio-container, .app, .main, .contain, .wrap,
+.dark, .dark body, .dark .gradio-container, .dark .app, .dark .main, .dark .contain, .dark .wrap{
+  background-color:#FAF9F5 !important;
+}
+body, gradio-app, .gradio-container, .dark body, .dark .gradio-container{ color:#2B2B26 !important; }
+.dark .block, .dark .form, .dark .panel{ background-color:transparent !important; }
+
+/* ── 对话正文不发灰 ──────────────────────────────────────
+   Gradio 6 自带：.prose.chatbot.md / .message-content 有 opacity:.8，
+   且 .prose *{color:var(--body-text-color)} 会盖掉 .message 的颜色；
+   系统深色模式下该变量是浅灰 #c8c9d2，落在强制的米白底上几乎看不清。 */
+.dark, :root { --body-text-color: #2B2B26 !important; --body-text-color-subdued: #84806F !important; }
+.chatbot .prose.chatbot.md, .chatbot .message-content, .message-wrap .prose { opacity: 1 !important; }
+.chatbot .message .prose *:not(a):not(code),
+.chatbot .message-text, .chatbot .md *:not(a):not(code) { color: #2B2B26 !important; }
+
+/* ── 版面铺满浏览器（2026-10-14 用户要求）──────────────────
+   原来外框最宽 860px、阅读栏 740px，宽屏只占中间 2/3；侧栏收起后文字也不变宽。
+   现在内容随浏览器宽度走，两边留 32px；侧栏展开让出 280px，收起只让 64px 图标栏。 */
+:root, .dark { --nk-col: 100%; }
+.gradio-container { max-width: none !important; width: 100% !important;
+  padding-left: 32px !important; padding-right: 32px !important; box-sizing: border-box !important; }
+/* 注意：选择器必须以 .gradio-container 开头，且不能写在 @media 里——否则 Gradio 会自动加前缀
+   ".gradio-container .contain"，而侧栏外层的 .wrap 在 .contain 外层，规则永远匹配不上。
+   不用 .sidebar-parent 类名：Gradio 6.9 不是每次都加。.wrap:has(> .contain #nk-side-wrap) 只匹配侧栏所在那层。
+   这层 .wrap 左边已被外框和 main 的内边距推进 64px，所以展开时再让 240px（=280+24-64），收起时让 24px。
+   手机（≤768px）：展开是浮层抽屉不让位，收起时图标栏右边留 8px：clamp 在窄屏取下限 8px。 */
+.gradio-container .wrap:has(> .contain #nk-side-wrap.open) {
+  padding-left: clamp(8px, calc((100vw - 768px) * 1000), 240px) !important; }
+.gradio-container .wrap:has(> .contain #nk-side-wrap:not(.open)) {
+  padding-left: clamp(8px, calc((100vw - 768px) * 1000), 24px) !important; }
+@media (max-width: 768px) {
+  .gradio-container { padding-left: 12px !important; padding-right: 12px !important; }
+  /* 手机展开：完整从左边滑出、浮在正文上（Gradio 默认把它推到 -100vw，配上 280px 宽度会露半截盖住正文） */
+  #nk-side-wrap.sidebar.open {
+    left: 0 !important; right: auto !important; transform: none !important;
+    width: 280px !important; max-width: 85vw !important; z-index: 1000 !important;
+    box-shadow: 4px 0 24px rgba(43,43,38,.18) !important;
+  }
+}

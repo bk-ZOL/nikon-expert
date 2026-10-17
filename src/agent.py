@@ -7,9 +7,11 @@ import os
 import queue
 import asyncio
 import threading
+import traceback
+import contextvars
 
 from llama_index.core.agent.workflow import (
-    ReActAgent, AgentStream, ToolCall, ToolCallResult,
+    ReActAgent, AgentStream, AgentInput, ToolCall, ToolCallResult,
 )
 
 from src.tools import build_tools, SourceCollector
@@ -23,12 +25,15 @@ SYSTEM_PROMPT = """你是「Nikon Expert」—— 晶圆厂 Nikon 光刻机设�
 你的工作方式（务必遵守）：
 1. 面对故障描述，先判断「要下结论还缺什么信息」，再决定调用哪个工具去取证，不要凭空回答。
 2. 善用工具组合，多步取证：
-   - 出现明确报警码 → 先用 error_code_lookup 查含义；
+   - 遇到报警 / 故障 → **先用 troubleshooting_lookup 查现场验证过的经验**（根因、真正有效的措施、发生次数），回答里注明「现场处理过 N 次」；
+   - 出现明确报警码 → 再用 error_code_lookup 查含义（现场写法如 STG-29-80 也直接传给它，会自动换算成手册里的主码/细分码）；
    - 想找历史处置先例 / 定位根因 → 用 fault_history_lookup；
-   - 查具体部件、参数、操作步骤 → 用 keyword_search；
+   - 问「怎么做 / 步骤 / 流程 / SOP」（拆装、调整、清洁、软件操作、确认作业）→ **先用 procedure_lookup** 取完整的原文步骤，按原文顺序整理成中文步骤，不增删步骤，按钮名/参数名/数值保留原文；
+   - 查具体部件、参数 → 用 keyword_search；
    - 概念/原理/「为什么」类 → 用 semantic_search；
    - 涉及接线/电路/信号/机械装配、需要看图纸时 → 用 inspect_diagram（定位相关页 + 文字层内容 + 原图链接）；
-   - 要确认"某元件/传感器连到哪、用哪根线/pin、到哪个面板板卡" → 用 trace_connection（按线号交叉引用还原连接）。
+   - 问题里有接插件号（J7554A、P1394A）或线缆号（4S095-884），要查"接到哪、经过哪根线、哪几针" → 先用 netlist_trace（S207D 线表，可往外追几跳）；
+   - 要确认"某元件/传感器连到哪、用哪根线/pin、到哪个面板板卡"，netlist_trace 查不到或没有编号时 → 用 trace_connection（按线号交叉引用还原连接）。
 3. 允许多轮调用：拿到一个工具结果后，若信息仍不足以支撑排查结论，继续调用其他工具。
    但务必高效：不要用相同参数重复调用同一个工具；一旦已取到足够信息，立即停止取证、直接给出最终结论，不要为凑步数而反复搜索。
 4. 所有技术结论必须来自工具返回的资料，禁止捏造 Error Code、参数数值、操作步骤或章节号。
@@ -48,7 +53,158 @@ Step 2：... [来源：...]
 
 **【相关历史案例】**（如取到）
 （故障履历中的相似案例简述 + 引用）
+
+如果问的是**操作步骤 / 作业方法**（不是故障），不用上面的排障结构，改用：
+**【作业说明】**（做什么、适用机型、出自哪份资料哪一节）
+**【准备 / 前提条件】**（工具、备件、要先完成的作业；原文没写就不写）
+**【操作步骤】**（按原文顺序和分段，Step 1、Step 2…，每步末尾标来源）
+**【注意事项】**（原文的 NOTE / CAUTION / WARNING，机型差异）
+
+【思考（Thought）的写法】
+每一步的 Thought 会实时显示给现场工程师看，**一律用中文**，一两句话说清楚“刚才查到了什么、接下来查什么、为什么”，不要写英文。
+**Thought 里绝不写结论正文。** 信息够了就严格按格式输出：先写一句 `Thought: 信息已足够，给出结论。`，换行写 `Answer:`，把上面的结论模板全部写在 `Answer:` 后面。
 """
+
+
+def history_text(content) -> str:
+    """取聊天记录里一条消息的纯文字。
+    gradio 6 回传的 content 是 [{'type':'text','text':...}, ...] 列表，不是字符串；文件/图片块忽略。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        content = [content]
+    if isinstance(content, (list, tuple)):
+        # 多轮后会出现嵌套：{'type':'text','text':[{'type':'text',...}]}，递归取文字
+        return "\n".join(history_text(b.get("text", "")) if isinstance(b, dict) else history_text(b)
+                         for b in content).strip()
+    return ""
+
+
+_DSML_RE = None
+
+
+def _strip_dsml(text: str) -> str:
+    """DeepSeek 偶尔不走工具调用接口，把调用当文字吐出（<｜DSML｜invoke ...>），显示前去掉。"""
+    global _DSML_RE
+    if "DSML" not in text:
+        return text
+    import re
+    if _DSML_RE is None:
+        _DSML_RE = re.compile(r"<[｜|]+\s*DSML\s*[｜|]+.*", re.S)   # 从第一个 DSML 标记起全部丢弃
+    return _DSML_RE.sub("", text).rstrip(" \n-")
+
+
+class ReActStreamParser:
+    """把 ReAct 的原始流（"Thought: …\nAction: …" / "Thought: …\nAnswer: …"）拆成可显示的片段。
+
+    feed(delta) 返回 [(kind, text), …]，kind 为 "thought"（思考）或 "answer"（结论）。
+    - Action / Action Input 不显示（界面另有 🔧 行）；一步里出现第一个 Action 后，本步剩余内容都丢弃
+      （模型常常一口气写好几组 Thought/Action，只有第一组会真正执行）。
+    - 末尾扣住 HOLD 个字符再放，免得把 "Action"/"Answer" 关键字或 DSML 标记的前半截先显示出去。
+    - 结论里一旦出现 DSML 工具调用标记，就截断、不再输出。
+    """
+    HOLD = 12
+    THOUGHT_MAX = 150     # 每步思考最多显示的字数
+    _STOP_THOUGHT = ("\nAction:", "Action:", "Answer:")
+
+    def __init__(self):
+        self.answer_started = False   # 整次运行是否已开始输出结论
+        self.answer_text = ""
+        self.reset()
+
+    def reset(self):
+        self.buf = ""         # 本步累计原文
+        self.pos = 0          # 已经处理到 buf 的哪里
+        self.mode = "head"    # head（等 Thought:/Answer:）/ thought / muted（思考已收起）/ answer / done
+        self.thought_len = 0
+
+    def _emit_upto(self, end, kind, out):
+        if end > self.pos:
+            out.append((kind, self.buf[self.pos:end]))
+            self.pos = end
+
+    def feed(self, delta: str, final: bool = False) -> list:
+        out = []
+        self.buf += delta
+        while True:
+            if self.mode == "head":
+                i_t, i_a = self.buf.find("Thought:", self.pos), self.buf.find("Answer:", self.pos)
+                if i_a != -1 and (i_t == -1 or i_a < i_t):
+                    self.pos, self.mode = i_a + len("Answer:"), "answer"
+                    continue
+                if i_t != -1:
+                    self.pos, self.mode = i_t + len("Thought:"), "thought"
+                    continue
+                if "Action:" in self.buf[self.pos:]:
+                    self.mode = "done"
+                return out
+            if self.mode == "thought":
+                # 模型有时把整篇结论塞进 Thought（没写 Answer:），框架会让它重写，界面上就会重复好几遍。
+                # 思考只显示开头一两句：到 THOUGHT_MAX 字或出现结论标题「**【」就收起（mute_at），后面静默跳过。
+                cut = self.buf.find("**【", self.pos)
+                mute_at = self.pos + max(self.THOUGHT_MAX - self.thought_len, 0)
+                if cut != -1:
+                    mute_at = min(mute_at, cut)
+                hits = [(self.buf.find(k, self.pos), k) for k in self._STOP_THOUGHT]
+                hits = [(i, k) for i, k in hits if i != -1]
+                stop_i, stop_k = min(hits) if hits else (None, None)
+                if stop_i is not None and stop_i <= mute_at:
+                    self._emit_thought(stop_i, out)
+                    if stop_k == "Answer:":
+                        self.pos, self.mode = stop_i + len(stop_k), "answer"
+                        continue
+                    self.mode = "done"
+                    return out
+                end = len(self.buf) if final else max(self.pos, len(self.buf) - self.HOLD)
+                if mute_at < end or stop_i is not None:
+                    self._emit_thought(min(mute_at, end), out)
+                    out.append(("thought", "…"))
+                    self.mode = "muted"
+                    continue
+                self._emit_thought(end, out)
+                return out
+            if self.mode == "muted":
+                # 思考已收起：只等 Action:（本步结束）或 Answer:（开始结论）
+                i_ans = self.buf.find("Answer:", self.pos)
+                i_act = self.buf.find("Action:", self.pos)
+                if i_ans != -1 and (i_act == -1 or i_ans < i_act):
+                    self.pos, self.mode = i_ans + len("Answer:"), "answer"
+                    continue
+                if i_act != -1:
+                    self.mode = "done"
+                return out
+            if self.mode == "answer":
+                if not self.answer_started:
+                    # 去掉 "Answer:" 后紧跟的空白
+                    while self.pos < len(self.buf) and self.buf[self.pos] in " \n":
+                        self.pos += 1
+                cut = min([i for i in (self.buf.find("DSML", self.pos), self.buf.find("<｜", self.pos),
+                                       self.buf.find("<|", self.pos)) if i != -1], default=-1)
+                if cut != -1:
+                    self._emit_answer(cut, out)
+                    self.mode = "done"
+                    return out
+                end = len(self.buf) if final else max(self.pos, len(self.buf) - self.HOLD)
+                self._emit_answer(end, out)
+                return out
+            return out   # done
+
+    def _emit_thought(self, end, out):
+        if end > self.pos:
+            self.thought_len += end - self.pos
+            self._emit_upto(end, "thought", out)
+
+    def _emit_answer(self, end, out):
+        if end > self.pos:
+            t = self.buf[self.pos:end]
+            self.answer_started = True
+            self.answer_text += t
+            out.append(("answer", t))
+            self.pos = end
+
+    def flush(self) -> list:
+        """本步结束：把扣住的尾巴放出来。"""
+        return self.feed("", final=True)
 
 
 def _to_chat_history(history):
@@ -59,7 +215,7 @@ def _to_chat_history(history):
     msgs = []
     for m in history[-6:]:
         role = m.get("role", "user")
-        content = (m.get("content", "") or "")[:800]
+        content = history_text(m.get("content", ""))[:800]
         if not content:
             continue
         msgs.append(ChatMessage(role="user" if role == "user" else "assistant", content=content))
@@ -73,7 +229,7 @@ async def _agent_events(question: str, history=None):
 
     eng = _init_engine()
     collector = SourceCollector()
-    tools = build_tools(collector, retriever=eng.get("retriever"))
+    tools = build_tools(collector, retriever=eng.get("retriever"), question=question, history=history)
 
     agent = ReActAgent(
         tools=tools,
@@ -82,7 +238,10 @@ async def _agent_events(question: str, history=None):
         max_iterations=MAX_ITER,
     )
 
-    handler = agent.run(question, chat_history=_to_chat_history(history))
+    # 问题里的缩写附上对照（RR = Reticle Rotation …），让它检索时用全称、几种意思按上下文选
+    from src import glossary
+    hint = glossary.hint(question)
+    handler = agent.run(f"{question}\n\n{hint}" if hint else question, chat_history=_to_chat_history(history))
 
     async for ev in handler.stream_events():
         # 注意：ToolCallResult 是 ToolCall 的子类，必须先判子类
@@ -94,11 +253,15 @@ async def _agent_events(question: str, history=None):
             yield {"kind": "tool_call",
                    "tool": ev.tool_name,
                    "args": dict(ev.tool_kwargs)}
-        # AgentStream（原始 ReAct 推理 token）P1 暂不透传，避免 Thought/Action 脚手架噪声
+        elif isinstance(ev, AgentStream):
+            # 原始 ReAct 推理 token：交给 ReActStreamParser 拆出 Thought（思考）/ Answer（结论）实时显示
+            yield {"kind": "stream", "delta": ev.delta or ""}
+        elif isinstance(ev, AgentInput):
+            yield {"kind": "step"}    # 新一步开始，解析状态归零
 
     resp = await handler
     yield {"kind": "answer",
-           "text": str(resp),
+           "text": _strip_dsml(str(resp)),
            "citations": collector.citations(),
            "citations_data": collector.citations_data(),
            "has_result": collector.has_any()}
@@ -122,12 +285,15 @@ def run_agent_sync(question: str, history=None):
                 q.put(ev)
         try:
             asyncio.run(go())
-        except Exception as e:
+        except BaseException as e:  # CancelledError 等不是 Exception 子类，漏掉会让 agent 无声结束
+            traceback.print_exc()
             q.put({"kind": "error", "error": f"{type(e).__name__}: {e}"})
         finally:
             q.put(SENTINEL)
 
-    t = threading.Thread(target=worker, daemon=True)
+    # 带上调用方的 contextvars（ACL 登录身份），否则工具里的检索拿不到当前用户
+    ctx = contextvars.copy_context()
+    t = threading.Thread(target=lambda: ctx.run(worker), daemon=True)
     t.start()
     while True:
         ev = q.get()

@@ -13,9 +13,9 @@ from src import acl  # noqa: E402
 from src.acl import User, visible, load_user, fts_acl_clause, PermissionDenied  # noqa: E402
 
 
-def _doc(sec_level=3, owner_scope="vendor:nikon", review_status="approved", **kw):
-    return {"sec_level": sec_level, "owner_scope": owner_scope,
-            "review_status": review_status, **kw}
+def _doc(sec_level=3, category="oem_manual", review_status="approved", models=("ALL",), customer="none", **kw):
+    return {"sec_level": sec_level, "category": category, "review_status": review_status,
+            "models": list(models), "customer": customer, **kw}
 
 
 def _user(clearance=3, scopes=("internal",), role="engineer", uid="u1"):
@@ -25,20 +25,39 @@ def _user(clearance=3, scopes=("internal",), role="engineer", uid="u1"):
 
 CASES = [
     # (说明, user, doc, 期望可见)
-    ("原厂L3+有nikon域 → 可见", _user(3, ("internal", "vendor:nikon")), _doc(3, "vendor:nikon"), True),
-    ("原厂L3+无nikon域 → 挡", _user(3, ("internal",)), _doc(3, "vendor:nikon"), False),
-    ("密级不足(L2<L3) → 挡", _user(2, ("internal", "vendor:nikon")), _doc(3, "vendor:nikon"), False),
-    ("public 任何人可见", _user(2, ()), _doc(1, "public"), True),
-    ("未approved → 挡", _user(4, ("internal",)), _doc(2, "internal", "pending"), False),
+    # —— 旧格式授权照样认（internal / vendor:nikon / customer:x）
+    ("原厂手册+有nikon域 → 可见", _user(3, ("internal", "vendor:nikon")), _doc(3, "oem_manual"), True),
+    ("原厂手册+无nikon域 → 挡", _user(3, ("internal",)), _doc(3, "oem_manual"), False),
+    ("密级不足(L2<L3) → 挡", _user(2, ("internal", "vendor:nikon")), _doc(3, "oem_manual"), False),
+    ("未approved → 挡", _user(4, ("internal",)), _doc(2, "sop", "pending"), False),
     ("跨客户:持欣奕华看星钥 → 挡", _user(4, ("internal", "customer:xinyihua")),
-        _doc(4, "customer:xingyue", acl_users=["u1"]), False),
-    ("L4+归属域对但不在ACL → 挡", _user(4, ("internal", "customer:xingyue")),
-        _doc(4, "customer:xingyue", acl_users=["someone_else"]), False),
-    ("L4+归属域对+在ACL → 可见", _user(4, ("internal", "customer:xingyue")),
-        _doc(4, "customer:xingyue", acl_users=["u1"]), True),
-    ("缺字段 → 默认拒绝", _user(4, ("internal",)), {"owner_scope": "internal"}, False),
-    ("shared_scopes 相交 → 可见", _user(3, ("customer:pcl",)),
-        _doc(3, "internal", shared_scopes=["customer:pcl"]), True),
+        _doc(4, "customer_deliverable", customer="xingyue"), False),
+    ("客户对+L4 → 可见", _user(4, ("internal", "customer:xingyue")),
+        _doc(4, "customer_deliverable", customer="xingyue"), True),
+    ("缺字段 → 默认拒绝", _user(4, ("internal",)), {"sec_level": 2, "review_status": "approved"}, False),
+    # —— v2 新格式
+    ("只给手册类别：手册可见", _user(3, ("cat:oem_manual",)), _doc(3, "oem_manual"), True),
+    ("只给手册类别：电路图挡", _user(3, ("cat:oem_manual",)), _doc(3, "circuit"), False),
+    ("机型限 S308F：S207D 资料挡", _user(3, ("cat:oem_manual", "model:S308F")),
+        _doc(3, "oem_manual", models=("S207D",)), False),
+    ("机型限 S308F：S308F 资料可见", _user(3, ("cat:oem_manual", "model:S308F")),
+        _doc(3, "oem_manual", models=("S308F",)), True),
+    ("机型限 S308F：通用资料(ALL)默认看不到", _user(3, ("cat:oem_manual", "model:S308F")),
+        _doc(3, "oem_manual", models=("ALL",)), False),
+    ("机型限 S308F + 通用：通用资料可见", _user(3, ("cat:oem_manual", "model:S308F", "model:COMMON")),
+        _doc(3, "oem_manual", models=("ALL",)), True),
+    ("机型限 S207D：S206D/S207D 共用资料可见", _user(3, ("cat:sop", "model:S207D")),
+        _doc(3, "sop", models=("S206D", "S207D")), True),
+    ("机型限 S207D：S308F 资料挡", _user(3, ("cat:sop", "model:S207D", "model:COMMON")),
+        _doc(3, "sop", models=("S308F",)), False),
+    ("全部机型账号：通用资料可见", _user(3, ("cat:sop", "model:ALL")),
+        _doc(3, "sop", models=("ALL",)), True),
+    ("机型限 S308F：多机型资料含 S308F 可见", _user(3, ("cat:sop", "model:S308F")),
+        _doc(3, "sop", models=("S207D", "S308F")), True),
+    ("没勾客户：客户的故障履历挡", _user(4, ("cat:fault_history",), role="manager"),
+        _doc(3, "fault_history", customer="xingyue"), False),
+    ("勾了客户：客户的故障履历可见", _user(4, ("cat:fault_history", "cust:xingyue"), role="manager"),
+        _doc(3, "fault_history", customer="xingyue"), True),
 ]
 
 
@@ -52,18 +71,18 @@ def test_deny_when_no_identity():
 
 
 def test_superuser_sees_all():
-    assert visible(acl.SYSTEM_USER, _doc(4, "customer:xingyue")) is True
+    assert visible(acl.SYSTEM_USER, _doc(4, "customer_deliverable", customer="xingyue")) is True
 
 
 def test_auditor_reads_nothing():
     a = User(uid="aud", role="auditor", clearance=0, active_scopes=frozenset())
-    assert visible(a, _doc(1, "public")) is False
+    assert visible(a, _doc(1, "sop")) is False
 
 
 def test_security_disabled_allows_all(monkeypatch=None):
     os.environ["SECURITY_ENABLED"] = "false"
     try:
-        assert visible(None, _doc(4, "customer:xingyue")) is True
+        assert visible(None, _doc(4, "customer_deliverable", customer="xingyue")) is True
         assert fts_acl_clause(None) == ("", [])
     finally:
         os.environ["SECURITY_ENABLED"] = "true"
@@ -79,9 +98,31 @@ def test_fts_clause_denies_no_identity():
 
 def test_fts_clause_shape():
     sql, params = fts_acl_clause(_user(3, ("internal", "vendor:nikon")))
-    assert "doc_acl" in sql and "review_status = 'approved'" in sql
-    # params: clearance + scopes(+public) + uid
-    assert params[0] == 3 and "public" in params and params[-1] == "u1"
+    assert "doc_acl" in sql and "review_status = 'approved'" in sql and "a.category IN" in sql
+    assert params[0] == 3 and "oem_manual" in params and "none" in params
+    assert "a.models LIKE" not in sql            # 不限机型时不加机型条件
+    sql2, params2 = fts_acl_clause(_user(3, ("cat:sop", "model:S308F")))
+    assert "a.models LIKE" in sql2 and "%,S308F,%" in params2 and "%,ALL,%" not in params2   # 没给通用资料
+
+
+def test_can_see_tools():
+    u = _user(3, ("cat:circuit", "model:S308F"))
+    assert acl.can_see(u, "circuit", "S308F") and not acl.can_see(u, "circuit", "S207D")
+    assert not acl.can_see(u, "oem_manual")
+    assert acl.can_see(_user(3, ("vendor:nikon",)), "circuit", "S207D")   # 旧格式 = 全部机型
+
+
+def test_fts_clause_common_only():
+    sql, params = fts_acl_clause(_user(3, ("cat:sop", "model:COMMON")))
+    assert params[-1] == "%,ALL,%" and "%,S207D,%" not in params
+
+
+def test_parse_grants_legacy_and_new():
+    cats, models, custs = acl.parse_grants({"internal", "customer:pcl"})
+    assert "sop" in cats and "customer_deliverable" in cats and "oem_manual" not in cats
+    assert custs == {"pcl"} and models == {"ALL"}
+    cats, models, custs = acl.parse_grants({"cat:circuit", "model:S207D", "model:S308F"})
+    assert cats == {"circuit"} and models == {"S207D", "S308F"} and not custs
 
 
 def test_load_user_drops_expired_scope():

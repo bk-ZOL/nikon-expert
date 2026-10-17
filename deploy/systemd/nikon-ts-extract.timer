@@ -1,0 +1,9 @@
+[Unit]
+Description=每天北京 04:30 抽取一次 Troubleshooting 表新案例
+
+[Timer]
+OnCalendar=*-*-* 20:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

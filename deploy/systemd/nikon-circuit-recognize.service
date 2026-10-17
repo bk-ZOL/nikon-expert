@@ -1,0 +1,12 @@
+[Unit]
+Description=Nikon Expert 电路图识图（OCR + 矢量字形，新入库的电路图）
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/nikon-expert
+Environment=PYTHONUNBUFFERED=1
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/opt/nikon-expert/.venv/bin/python /opt/nikon-expert/scripts/circuit_recognize.py
+TimeoutStartSec=infinity

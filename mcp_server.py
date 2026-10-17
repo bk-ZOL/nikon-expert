@@ -139,6 +139,8 @@ def nikon_search(query: str, doc_type: str = "", machine_model: str = "", limit:
 @mcp.tool()
 def nikon_search_error_code(code: str, limit: int = 8) -> str:
     """Look up a specific Nikon error code exactly (e.g. E-5301, P-12345, ALM-04).
+    Field notation like STG-29-80 (controller-main-detail) is converted to the manual's
+    main code 29H / detail 80H, with the original text from e_st_0540 and the Error Code List.
 
     Uses phrase matching for precise error code retrieval.
 
@@ -147,16 +149,21 @@ def nikon_search_error_code(code: str, limit: int = 8) -> str:
         limit: Max results (default 8)
     """
     from src.fulltext import search_fts_exact
+    from src.error_code import lookup as _conv
 
+    try:
+        conv = _conv(code)                 # 现场写法 STG-29-80 → 手册主码 29H / 细分码 80H + 原文
+    except Exception as e:
+        conv = f"(error code conversion failed: {e})"
     try:
         results = search_fts_exact(code.strip(), limit=limit)
     except Exception as e:
-        return f"Error: {e}"
+        return (conv + "\n\n" if conv else "") + f"Error: {e}"
 
     if not results:
-        return f"No records for: {code}"
+        return (conv + "\n\n" if conv else "") + f"No records for: {code}"
 
-    lines = [f"Error code: {code} — {len(results)} matches", ""]
+    lines = ([conv, ""] if conv else []) + [f"Error code: {code} — {len(results)} matches", ""]
     for i, r in enumerate(results, 1):
         lines.append(f"[{i}] {r.get('doc_name', '')} | {r.get('section_title', '')}")
         lines.append(f"    {r.get('text', '')[:400]}")

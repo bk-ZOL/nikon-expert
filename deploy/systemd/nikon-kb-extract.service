@@ -1,0 +1,12 @@
+[Unit]
+Description=Nikon Expert 夜间提炼：Mac 本地模型提炼故障排查、SOP 分模块（Mac 不在线或正在用就跳过）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/nikon-expert
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/nikon-expert/.venv/bin/python /opt/nikon-expert/scripts/kb_extract.py
+TimeoutStartSec=8h
+Nice=10

@@ -2,6 +2,8 @@
 
 落地《Nikon_Expert_权限与分层保密管理设计方案 V1.0》第 2 / 4 章：
   · 三维正交模型：密级 sec_level(有序) × 归属域 owner_scope(集合) × 角色 role。
+  · v2（2026-10-15）：归属域细分为 类别 category × 机型 models × 客户 customer，账号按三个维度分别授权；
+    L4 不再要求逐份点名，有 L4 密级 + 对应类别/客户授权即可见（逐份点名在管理页里不好维护）。
   · 所有检索路径共用 visible() / build_qdrant_filter() / fts_acl_clause()，禁止旁路。
   · 默认拒绝 (Deny by Default)：缺字段 / 缺身份 / 异常 一律不可见。
 
@@ -39,6 +41,89 @@ ROLE_MAX_CLEARANCE = {
 
 PUBLIC_SCOPE = "public"
 
+# ── v2 细分维度（2026-10-15）：资料 = 类别 × 机型 × 客户 × 密级 × 审核状态 ─────────
+# 账号授权存在 user_scopes 里，用前缀区分：cat:<类别> / model:<机型|ALL> / cust:<客户>。
+# 旧格式 internal / vendor:nikon / customer:<x> 仍然认，按下面的映射换算。
+CATEGORIES = {
+    "oem_manual": "原厂手册",
+    "circuit": "原厂电路图",
+    "sop": "内部SOP/检查表",
+    "fault_history": "故障履历",
+    "worklog": "工作日志",
+    "customer_deliverable": "客户交付物",
+    "commercial": "商务资料",
+    "other": "其他/未分类",
+}
+MODELS = ["S207D", "S206D", "S308F", "SF100"]   # 机型族；资料不限机型时记 ALL
+ALL_MODELS = "ALL"        # 资料：不分机型的通用资料；账号：model:ALL = 所有机型 + 通用资料都能看
+COMMON_GRANT = "COMMON"   # 账号：model:COMMON = 能看通用资料（按机型隔离的账号可以不给）
+NO_CUSTOMER = "none"                            # 不属于任何客户的资料
+_LEGACY_INTERNAL_CATS = {"sop", "fault_history", "worklog", "commercial", "other"}
+_LEGACY_VENDOR_CATS = {"oem_manual", "circuit"}
+
+
+def _model_tokens(models) -> list:
+    """账号的机型授权 → 资料 models 字段里要匹配的值（COMMON 对应资料的 ALL）。"""
+    toks = sorted(m for m in models if m not in (ALL_MODELS, COMMON_GRANT))
+    if COMMON_GRANT in models:
+        toks.append(ALL_MODELS)
+    return toks
+
+
+def models_ok(user_models, doc_models) -> bool:
+    """机型维度判定。账号 ALL = 全放行；资料 ALL（通用）要求账号有 COMMON；否则机型要有交集。"""
+    if ALL_MODELS in user_models:
+        return True
+    doc_models = set(doc_models or [ALL_MODELS])
+    if ALL_MODELS in doc_models:
+        return COMMON_GRANT in user_models
+    return bool(doc_models & set(user_models))
+
+
+def can_see(user, category: str, model: str = None) -> bool:
+    """非检索类工具（线表、错误码换算等）用：这个账号能不能看某类别 / 某机型的资料。"""
+    if not security_enabled():
+        return True
+    user = _resolve(user)
+    if user is None:
+        return False
+    if user.is_superuser:
+        return True
+    if user.is_auditor:
+        return False
+    cats, models, _ = user.grants
+    if category not in cats:
+        return False
+    return model is None or models_ok(models, [model])
+
+
+def customers() -> dict:
+    """客户 key → 显示名（来自定级用的客户词典）。"""
+    from src.acl_classify import CUSTOMER_DICT
+    return {scope.split(":", 1)[1]: keys[0] for keys, scope in CUSTOMER_DICT}
+
+
+def parse_grants(scopes) -> tuple:
+    """授权串 → (类别集合, 机型集合, 客户集合)。没有任何机型授权 = 不限机型。"""
+    cats, models, custs = set(), set(), set()
+    for s in scopes or ():
+        if s.startswith("cat:"):
+            cats.add(s[4:])
+        elif s.startswith("model:"):
+            models.add(s[6:])
+        elif s.startswith("cust:"):
+            custs.add(s[5:])
+        elif s == "internal":
+            cats |= _LEGACY_INTERNAL_CATS
+        elif s == "vendor:nikon":
+            cats |= _LEGACY_VENDOR_CATS
+        elif s.startswith("customer:"):
+            custs.add(s.split(":", 1)[1])
+            cats.add("customer_deliverable")
+    if not models:
+        models = {ALL_MODELS}
+    return frozenset(cats), frozenset(models), frozenset(custs)
+
 
 class PermissionDenied(Exception):
     """鉴权失败。异常即拒绝——调用方禁止 try/except 后放行。"""
@@ -57,6 +142,11 @@ class User:
     @property
     def is_auditor(self) -> bool:
         return self.role == "auditor"
+
+    @property
+    def grants(self) -> tuple:
+        """(类别, 机型, 客户) 三个集合。"""
+        return parse_grants(self.active_scopes)
 
 
 # 维护脚本（迁移/定级/回填）专用超级用户。绝不可作为匿名兜底注入请求路径。
@@ -109,32 +199,25 @@ def visible(user: Optional[User], doc: dict) -> bool:
     if user.is_auditor:
         return False  # 审计员只读日志，不读文档内容
 
-    # 默认拒绝：缺字段视同 L4 且不可见
+    # 默认拒绝：缺字段视同不可见
     try:
         sec_level = int(doc["sec_level"])
-        owner_scope = doc["owner_scope"]
         review_status = doc["review_status"]
+        category = doc["category"]
     except (KeyError, TypeError, ValueError):
         return False
-
     if review_status != "approved":
         return False  # 未定级 / 未复核 一律不可见
     if user.clearance < sec_level:
         return False  # 密级维度
-
-    # 归属域维度：owner_scope 命中，或 public，或 shared_scopes 与用户域相交
-    scopes = user.active_scopes
-    shared = set(doc.get("shared_scopes") or [])
-    if not (owner_scope == PUBLIC_SCOPE
-            or owner_scope in scopes
-            or (shared & scopes)):
-        return False
-
-    # L4 走显式点名 ACL
-    if sec_level >= 4:
-        if user.uid not in set(doc.get("acl_users") or []):
-            return False
-
+    cats, models, custs = user.grants
+    if category not in cats:
+        return False  # 类别维度
+    if not models_ok(models, doc.get("models") or [ALL_MODELS]):
+        return False  # 机型维度
+    customer = doc.get("customer") or NO_CUSTOMER
+    if customer != NO_CUSTOMER and customer not in custs:
+        return False  # 客户维度
     return True
 
 
@@ -161,18 +244,16 @@ def build_qdrant_filter(user: Optional[User]):
 
     from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, Range
 
-    scopes = _effective_scopes(user)
+    cats, models, custs = user.grants
     must = [
         FieldCondition(key="review_status", match=MatchValue(value="approved")),
         FieldCondition(key="sec_level", range=Range(lte=user.clearance)),
-        FieldCondition(key="owner_scope", match=MatchAny(any=scopes)),
+        FieldCondition(key="category", match=MatchAny(any=sorted(cats) or ["__none__"])),
+        FieldCondition(key="customer", match=MatchAny(any=sorted(custs) + [NO_CUSTOMER])),
     ]
-    # L4 必须显式命名：sec_level<=3  OR  uid in acl_users
-    l4_gate = Filter(should=[
-        FieldCondition(key="sec_level", range=Range(lte=3)),
-        FieldCondition(key="acl_users", match=MatchAny(any=[user.uid])),
-    ])
-    return Filter(must=must + [l4_gate])
+    if ALL_MODELS not in models:
+        must.append(FieldCondition(key="models", match=MatchAny(any=_model_tokens(models) or ["__none__"])))
+    return Filter(must=must)
 
 
 # ── FTS5 侧：ACL 子句注入（方案 4.4）─────────────────────────────────
@@ -192,19 +273,23 @@ def fts_acl_clause(user: Optional[User]) -> tuple:
     if user.is_auditor:
         return " AND 1 = 0", []  # 审计员读不到任何文档内容
 
-    scopes = _effective_scopes(user)
-    placeholders = ",".join("?" for _ in scopes)
+    cats, models, custs = user.grants
+    cats = sorted(cats) or ["__none__"]
+    custs = sorted(custs) + [NO_CUSTOMER]
+    model_sql, model_params = "", []
+    if ALL_MODELS not in models:
+        toks = _model_tokens(models) or ["__none__"]
+        model_sql = " AND (" + " OR ".join("a.models LIKE ?" for _ in toks) + ")"
+        model_params = [f"%,{m},%" for m in toks]
     clause = f"""
         AND doc_fts.doc_id IN (
             SELECT a.doc_id FROM doc_acl a
             WHERE a.review_status = 'approved'
               AND a.sec_level <= ?
-              AND a.owner_scope IN ({placeholders})
-              AND ( a.sec_level < 4 OR EXISTS (
-                    SELECT 1 FROM doc_acl_users u
-                    WHERE u.doc_id = a.doc_id AND u.uid = ? ) )
+              AND a.category IN ({",".join("?" for _ in cats)})
+              AND a.customer IN ({",".join("?" for _ in custs)}){model_sql}
         )"""
-    params = [user.clearance] + scopes + [user.uid]
+    params = [user.clearance] + cats + custs + model_params
     return clause, params
 
 

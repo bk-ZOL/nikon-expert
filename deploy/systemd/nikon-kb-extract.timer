@@ -1,0 +1,9 @@
+[Unit]
+Description=夜间提炼：北京时间 00:00~06:30 每半小时试一次（UTC 16:00~22:30）
+
+[Timer]
+OnCalendar=*-*-* 16..22:00,30:00
+Persistent=false
+
+[Install]
+WantedBy=timers.target

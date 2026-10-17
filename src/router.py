@@ -12,7 +12,7 @@ from typing import Optional
 # 否则任何提到机型的问题都会被误判为 troubleshoot→走慢速多步 agent。
 # 真 S 错误码要么带横杠(S-1234)要么 4-5 位数字(S12345)，均不与 3 位机型号冲突。
 ERROR_CODE_RE = re.compile(
-    r'\b([EWC]-?\d{3,5}|S-\d{3,5}|S\d{4,5}|P-\d{4,6}|ALM-\d{2,4}|SYS-\d{2,4})\b',
+    r'\b([EWC]-?\d{3,5}|S-\d{3,5}|S\d{4,5}|P-\d{4,6}|ALM-\d{2,4}|SYS-\d{2,4}|STG-[0-9A-F]{2}(?:-[0-9A-F]{2})?)\b',
     re.IGNORECASE,
 )
 
@@ -198,6 +198,16 @@ def _keyword_use_agent(question: str, mode: Optional[str] = None) -> bool:
     return False
 
 
+_PROCEDURE_RE = re.compile(
+    r"步骤|流程|sop|作业指导|操作规程|手順|procedure|how\s*to|"
+    r"(?:怎么|怎样|如何|咋)(?:做|操作|调|设|换|更换|拆|装|安装|清洁|清扫|擦|确认|检查|测|校|标定|恢复|启动|关闭|退出|打开|进入|设置|设定)", re.I)
+
+
+def is_procedure_query(question: str) -> bool:
+    """问操作步骤（怎么调 / 怎么换 / 步骤 / SOP）。"""
+    return bool(_PROCEDURE_RE.search(question or ""))
+
+
 def should_use_agent(question: str, mode: Optional[str] = None) -> bool:
     """判断走多步 Agent 排障还是单次 RAG 快路径。
 
@@ -212,6 +222,8 @@ def should_use_agent(question: str, mode: Optional[str] = None) -> bool:
     if os.getenv("AGENT_ALWAYS", "false").lower() in ("1", "true", "yes"):
         return True
 
+    if is_procedure_query(question):
+        return True                    # 操作步骤要走 procedure_lookup 拿完整流程，快路径只能拿到零散片段
     if os.getenv("AGENT_ROUTER", "semantic").lower() != "keyword":
         sem = _semantic_use_agent(question)
         if sem is not None:
@@ -248,7 +260,7 @@ def get_route_weights(query_type: str) -> tuple:
     return weights.get(query_type, (0.5, 0.5))
 
 
-def merge_results(
+def _merge_results_raw(
     fts_results: list,
     semantic_results: list,
     fts_weight: float = 0.5,
@@ -257,72 +269,68 @@ def merge_results(
     demote_circuit: bool = False,
     circuit_cap: int = 2,
     circuit_penalty: float = 0.25,
+    rrf_k: int = 60,
 ) -> list:
     """
-    融合 FTS 和语义检索结果。
+    Hybrid 融合：Reciprocal Rank Fusion (RRF)。
 
-    两者结果格式各自为:
-    - FTS: [{"doc_id", "doc_name", "text", "score", ...}]
-    - Semantic: llama-index NodeWithScore objects (有 .score, .metadata, .get_content())
+    比"分数归一化加权"更稳——只看两路各自的**排名**，与 BM25/余弦分数的尺度无关，
+    不会因某一路分数量纲大而压倒另一路。RRF 贡献 = weight × 1/(rrf_k + rank)，
+    同一文档两路都命中则相加（自然加权）。rrf_k 越大，头部名次差异越平缓（标准取 60）。
 
-    返回: 合并排序后的列表，每个元素是 dict:
-    {"doc_id", "doc_name", "doc_type", "machine_model", "section_title",
-     "text", "score", "source", "file_path", "page_start", ...}
+    入参两路均已按相关性**从好到差**排好（FTS 按 bm25 ORDER BY、语义按检索器分数）。
+    返回: [{"doc_id","doc_name","doc_type","machine_model","section_title",
+            "text","score","source","file_path","page_start"}, ...]
     """
     merged = {}
 
-    # ── 归一化 FTS 分数（BM25 负值，取绝对值后归一化）
-    fts_scores = [abs(r.get("score", 0)) for r in fts_results]
-    fts_max = max(fts_scores) if fts_scores else 1.0
+    def _key(doc_id, section, page):
+        return (doc_id, section or page)
 
+    # ── FTS 路：按名次给 RRF 分（列表内去重，取最佳名次；实体多路检索可能重复）
+    seen = set()
+    rank = 0
     for r in fts_results:
-        key = (r.get("doc_id", ""), r.get("section_title", "") or r.get("page_start", ""))
-        norm_score = (abs(r.get("score", 0)) / fts_max) * fts_weight if fts_max > 0 else 0
-        entry = {
-            "doc_id": r.get("doc_id", ""),
-            "doc_name": r.get("doc_name", ""),
-            "doc_type": r.get("doc_type", ""),
-            "machine_model": r.get("machine_model", ""),
-            "section_title": r.get("section_title", ""),
-            "text": r.get("text", ""),
-            "file_path": r.get("file_path", ""),
-            "page_start": r.get("page_start", ""),
-            "source": "fts",
-        }
+        key = _key(r.get("doc_id", ""), r.get("section_title", ""), r.get("page_start", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        contrib = fts_weight * (1.0 / (rrf_k + rank))
+        rank += 1
         if key in merged:
-            merged[key]["score"] += norm_score
-            if "semantic" not in merged[key]["source"]:
-                merged[key]["source"] = "fts+semantic"
+            merged[key]["score"] += contrib
+            merged[key]["source"] = "fts+semantic"
         else:
-            entry["score"] = norm_score
-            merged[key] = entry
+            merged[key] = {
+                "doc_id": r.get("doc_id", ""), "doc_name": r.get("doc_name", ""),
+                "doc_type": r.get("doc_type", ""), "machine_model": r.get("machine_model", ""),
+                "section_title": r.get("section_title", ""), "text": r.get("text", ""),
+                "file_path": r.get("file_path", ""), "page_start": r.get("page_start", ""),
+                "source": "fts", "score": contrib,
+            }
 
-    # ── 归一化语义分数
-    sem_scores = [n.score or 0.0 for n in semantic_results]
-    sem_max = max(sem_scores) if sem_scores else 1.0
-
+    # ── 语义路：同理
+    seen = set()
+    rank = 0
     for node in semantic_results:
         m = node.metadata or {}
-        key = (m.get("doc_id", ""), m.get("section_title", "") or m.get("page_start", ""))
-        norm_score = ((node.score or 0.0) / sem_max) * semantic_weight if sem_max > 0 else 0
-        entry = {
-            "doc_id": m.get("doc_id", ""),
-            "doc_name": m.get("doc_name", ""),
-            "doc_type": m.get("doc_type", ""),
-            "machine_model": m.get("machine_model", ""),
-            "section_title": m.get("section_title", ""),
-            "text": node.get_content(),
-            "file_path": m.get("file_path", ""),
-            "page_start": m.get("page_start", ""),
-            "source": "semantic",
-        }
+        key = _key(m.get("doc_id", ""), m.get("section_title", ""), m.get("page_start", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        contrib = semantic_weight * (1.0 / (rrf_k + rank))
+        rank += 1
         if key in merged:
-            merged[key]["score"] += norm_score
-            if "fts" not in merged[key]["source"]:
-                merged[key]["source"] = "fts+semantic"
+            merged[key]["score"] += contrib
+            merged[key]["source"] = "fts+semantic"
         else:
-            entry["score"] = norm_score
-            merged[key] = entry
+            merged[key] = {
+                "doc_id": m.get("doc_id", ""), "doc_name": m.get("doc_name", ""),
+                "doc_type": m.get("doc_type", ""), "machine_model": m.get("machine_model", ""),
+                "section_title": m.get("section_title", ""), "text": node.get_content(),
+                "file_path": m.get("file_path", ""), "page_start": m.get("page_start", ""),
+                "source": "semantic", "score": contrib,
+            }
 
     # ── 非电路类问题：压制逐页电路图（否则含 laser/stage 的问题会被图纸刷屏，
     #    把只在手册里一句话的答案挤出候选集）。降权 + 硬限额双保险。
@@ -346,3 +354,21 @@ def merge_results(
         return out
 
     return ranked[:top_n]
+
+
+def merge_results(fts_results, semantic_results, fts_weight=0.5, semantic_weight=0.5,
+                  top_n=6, query="", **kw):
+    """RRF 融合后按机型处理：问题点名了机型 → 只留该机型（及通用）的资料；没点名 → 自家机型优先（只降权）。"""
+    pool = _merge_results_raw(fts_results, semantic_results, fts_weight, semantic_weight,
+                              top_n=max(top_n * 3, top_n + 10), **kw)
+    try:
+        from src.machine_model import model_factor, models_in_query, matches_query_models
+        want = models_in_query(query)
+        if want:   # 2026-10-15：问 207 时引用里混进 308 的资料 → 点名机型就过滤，不只是降权
+            pool = [r for r in pool if matches_query_models(r.get("machine_model", ""), want)]
+        for r in pool:
+            r["score"] = r.get("score", 0) * model_factor(r.get("machine_model", ""), query)
+        pool.sort(key=lambda r: r.get("score", 0), reverse=True)
+    except Exception as e:
+        print(f"⚠️  机型加权跳过: {e}")
+    return pool[:top_n]

@@ -37,12 +37,27 @@ def _init_engine():
     top_k         = int(os.getenv("RETRIEVAL_TOP_K", "8"))
     rerank_top_n  = int(os.getenv("RERANK_TOP_N", "4"))
 
-    print(f"⚙️  加载 Embedding 模型：{embed_path}")
-    Settings.embed_model = HuggingFaceEmbedding(
-        model_name=embed_path,
-        max_length=512,
-        device=get_device(),
-    )
+    # Embedding：设了 EMBED_API_KEY 默认走云端 BGE-M3 API（快、省内存，向量兼容）；
+    # 否则本地 BGE-M3（零外传）。摄入子进程可用 env INGEST_EMBED=local/api 逐次覆盖
+    # （上传页「向量化方式」开关，两种都在服务器跑，向量同空间兼容）。
+    _has_key = bool(os.getenv("EMBED_API_KEY", "").strip())
+    _choice = os.getenv("INGEST_EMBED", "").strip().lower()
+    _use_api = _has_key
+    if _choice == "local":
+        _use_api = False
+    elif _choice == "api":
+        _use_api = _has_key   # 选了 API 但没配 key → 退回本地
+    if _use_api:
+        from src.api_embedding import APIEmbedding
+        Settings.embed_model = APIEmbedding()
+        print(f"⚙️  Embedding：云端 API（{Settings.embed_model.model_name}）—— 不吃本地 CPU")
+    else:
+        print(f"⚙️  加载 Embedding 模型（服务器本地）：{embed_path}")
+        Settings.embed_model = HuggingFaceEmbedding(
+            model_name=embed_path,
+            max_length=512,
+            device=get_device(),
+        )
 
     # 启动默认 LLM：LLM_PROVIDER 指定云端 provider（如 deepseek）时用它，否则本地 Ollama。
     # 云端部署（无本地 Ollama）靠这个默认到可用的 API。
@@ -68,18 +83,8 @@ def _init_engine():
 
     retriever = VectorIndexRetriever(index=index, similarity_top_k=top_k)
 
-    reranker = None
-    try:
-        from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
-        reranker = FlagEmbeddingReranker(model=reranker_path, top_n=rerank_top_n)
-        print("⚙️  重排序：FlagEmbeddingReranker")
-    except Exception:
-        try:
-            from llama_index.core.postprocessor import SentenceTransformerRerank
-            reranker = SentenceTransformerRerank(model=reranker_path, top_n=rerank_top_n)
-            print("⚙️  重排序：SentenceTransformerRerank")
-        except Exception as e:
-            print(f"⚠️  重排序不可用，跳过：{e}")
+    reranker = None   # 精排在 _rerank 里做（云端 bge-reranker API，失败回退 LLM），不再加载本地模型
+    print(f"⚙️  重排序：{_rerank_provider()}")
 
     # 初始化 FTS 层 (Karpathy)
     init_fts(fts_path)
@@ -203,6 +208,26 @@ def ingest_file(file_path: str) -> dict:
     return result
 
 
+def _embed_nodes_batched(nodes, ctx, doc_name: str, batch: int = 64):
+    """分批嵌入并写库，每批上报进度（供 UI 渲染真实进度条）。
+    token 来自摄入子进程的环境变量 INGEST_PROGRESS_TOKEN（=ingest_queue job id）。
+    分批用 index.insert_nodes；首批用构造函数（沿用原有验证过的路径）。"""
+    from llama_index.core import VectorStoreIndex
+    from src import ingest_progress as _p
+    token = os.getenv("INGEST_PROGRESS_TOKEN")
+    total = len(nodes)
+    if total == 0:
+        return
+    _p.write(token, "嵌入向量", 0, total)
+    first = nodes[:batch]
+    index = VectorStoreIndex(first, storage_context=ctx, show_progress=False)
+    _p.write(token, "嵌入向量", min(batch, total), total)
+    for i in range(batch, total, batch):
+        index.insert_nodes(nodes[i:i + batch])
+        _p.write(token, "嵌入向量", min(i + batch, total), total)
+    _p.write(token, "写入完成", total, total)
+
+
 def _ingest_md_file(eng, path: Path, rid: str, doc_name: str) -> dict:
     import hashlib
     from llama_index.core import VectorStoreIndex, Document, StorageContext
@@ -242,7 +267,7 @@ def _ingest_md_file(eng, path: Path, rid: str, doc_name: str) -> dict:
 
     vs = QdrantVectorStore(client=eng["client"], collection_name=eng["collection"])
     ctx = StorageContext.from_defaults(vector_store=vs)
-    VectorStoreIndex(nodes, storage_context=ctx, show_progress=False)
+    _embed_nodes_batched(nodes, ctx, doc_name)
     return {"success": True, "message": f"✅ 摄入完成：**{doc_name}**（{len(nodes)} chunks）", "chunks": len(nodes)}
 
 
@@ -253,7 +278,9 @@ def _ingest_pdf_file(eng, path: Path, rid: str, doc_name: str) -> dict:
     from llama_index.core.node_parser import SentenceSplitter
     from llama_index.vector_stores.qdrant import QdrantVectorStore
     from src.ingestor import _split_by_headings, _chunk_hash
+    from src import ingest_progress as _p
 
+    _p.write(os.getenv("INGEST_PROGRESS_TOKEN"), "解析 PDF", 0, 0)
     pages = pymupdf4llm.to_markdown(str(path), page_chunks=True)
     full_text = ""
     page_map = {}
@@ -275,6 +302,7 @@ def _ingest_pdf_file(eng, path: Path, rid: str, doc_name: str) -> dict:
                 best = pg
         return best
 
+    _p.write(os.getenv("INGEST_PROGRESS_TOKEN"), "切块中", 0, 0)
     sections = _split_by_headings(full_text, max_chunk=1024)
     child_splitter = SentenceSplitter(chunk_size=256, chunk_overlap=32)
     all_nodes = []
@@ -309,7 +337,7 @@ def _ingest_pdf_file(eng, path: Path, rid: str, doc_name: str) -> dict:
 
     vs = QdrantVectorStore(client=eng["client"], collection_name=eng["collection"])
     ctx = StorageContext.from_defaults(vector_store=vs)
-    VectorStoreIndex(all_nodes, storage_context=ctx, show_progress=False)
+    _embed_nodes_batched(all_nodes, ctx, doc_name)
     return {"success": True, "message": f"✅ 摄入完成：**{doc_name}**（{len(all_nodes)} chunks）", "chunks": len(all_nodes)}
 
 
@@ -405,7 +433,7 @@ def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
 
     threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.30"))
     top_k = int(os.getenv("RETRIEVAL_TOP_K", "8"))
-    rerank_top_n = int(os.getenv("RERANK_TOP_N", "4"))
+    rerank_top_n = int(os.getenv("RERANK_TOP_N", "6"))
     eng = _init_engine()
 
     # ── 1. 查询分类
@@ -414,6 +442,8 @@ def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
 
     # ── 2. FTS 检索 (Karpathy 层)
     fts_results = []
+    from src.progress import report
+    report("全文检索：在手册、履历里找关键词")
     try:
         fts_query = question
         # 精确匹配 Error Code
@@ -429,7 +459,9 @@ def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
             # 实体优先：对显著领域名词（氦气/encoder…）各做一次定向 FTS，
             # 保证这类"细节名词"不被整句里的高频词淹没（追加进 FTS 候选池）。
             seen_terms = set()
-            for term in extract_key_terms(question)[:4]:
+            # 缩写先按对照表展开成全称（RR → Reticle Rotation / レチクルローテーション），手册里多半写的是全称
+            from src import glossary
+            for term in glossary.expansions(question, max_terms=4) + extract_key_terms(question)[:4]:
                 if term in seen_terms:
                     continue
                 seen_terms.add(term)
@@ -440,20 +472,114 @@ def _retrieve_with_router(question: str, mode: str = "qa", user=None) -> list:
         pass
 
     # ── 3. 语义检索 (Gbrain 层)：按请求注入 ACL filter，失败则 fail-closed
+    report(f"语义检索：找意思相近的资料（关键词已命中 {len(fts_results)} 条）")
     semantic_results = []
     try:
-        nodes = _retrieve_semantic(eng, question, user, top_k)
+        from src import glossary
+        nodes = _retrieve_semantic(eng, glossary.augment(question), user, top_k)
         semantic_results = [n for n in nodes if (n.score or 0.0) >= threshold]
     except acl.PermissionDenied:
         raise
     except Exception:
         pass
 
-    # ── 4. 融合（非电路类问题压制逐页电路图，避免刷屏挤掉手册答案）
-    merged = merge_results(fts_results, semantic_results, fts_w, sem_w, top_n=top_k,
-                           demote_circuit=not is_circuit_query(question))
+    # ── 4. 融合(RRF)：先取较大候选池，再交给 Rerank 精排
+    rerank_pool = int(os.getenv("RERANK_POOL", "12"))
+    pool = merge_results(fts_results, semantic_results, fts_w, sem_w, top_n=rerank_pool, query=question,
+                         demote_circuit=not is_circuit_query(question))
 
+    # ── 5. Rerank 精排：把语义蹭词但不相关的挤掉，只留最相关的 rerank_top_n 条
+    report(f"精排：从 {len(pool)} 条候选里挑最相关的（这一步一般要 10~20 秒）")
+    merged = _rerank(question, pool, rerank_top_n)
     return merged, qtype
+
+
+def _rerank_provider() -> str:
+    """RERANK_PROVIDER=llm（默认，当前大脑精排）/ api（硅基流动 bge-reranker-v2-m3 免费版 + 与原名次融合）。
+
+    2026-10-14 用 8 个现场问题对比：api 每次 0.4s、llm 8~22s；但 api 会被字面相近的词带偏
+    （"reticle blind" 排出 "Reticle Resetting"），质量没有更好（llm 胜 2、api 胜 1、其余相当），所以默认仍用 llm。
+    """
+    p = os.getenv("RERANK_PROVIDER", "llm").lower()
+    return p if p in ("api", "llm") else "llm"
+
+
+def _rerank_api(question: str, candidates: list, top_n: int) -> list:
+    """云端 cross-encoder 精排：每段看标题 + 前 1500 字（LLM 精排只看前 180 字）。出错抛异常，由调用方回退。"""
+    import httpx
+    base = os.getenv("RERANK_API_BASE", os.getenv("EMBED_API_BASE", "https://api.siliconflow.cn/v1")).rstrip("/")
+    key = os.getenv("RERANK_API_KEY") or os.getenv("EMBED_API_KEY", "")
+    docs = [f"《{c.get('doc_name', '')}》{c.get('section_title', '') or ''}\n{(c.get('text', '') or '')[:1500]}"
+            for c in candidates]
+    with httpx.Client(timeout=float(os.getenv("RERANK_API_TIMEOUT", "15")), trust_env=False) as cli:
+        r = cli.post(f"{base}/rerank", headers={"Authorization": f"Bearer {key}"},
+                     json={"model": os.getenv("RERANK_API_MODEL", "BAAI/bge-reranker-v2-m3"),
+                           "query": question, "documents": docs, "top_n": len(docs), "return_documents": False})
+        r.raise_for_status()
+        res = sorted(r.json()["results"], key=lambda x: -x["relevance_score"])
+    # 融合：reranker 名次和检索阶段原名次（RRF）按 RERANK_API_WEIGHT（默认 0.6）加权，
+    # 防止 reranker 被字面相近的词带偏（reticle blind / Reticle Resetting）时把原本靠前的对题资料挤掉
+    w, k = float(os.getenv("RERANK_API_WEIGHT", "0.6")), 3
+    rank = {x["index"]: i for i, x in enumerate(res)}
+    score = {x["index"]: float(x["relevance_score"]) for x in res}
+    fused = sorted(range(len(candidates)), key=lambda i: -(w / (k + rank.get(i, len(res)))
+                                                        + (1 - w) / (k + i)))
+    out = []
+    for i in fused[:top_n]:
+        c = dict(candidates[i])
+        c["rerank_score"] = round(score.get(i, 0.0), 4)
+        out.append(c)
+    return out
+
+
+def _rerank(question: str, candidates: list, top_n: int) -> list:
+    """第三层 Rerank：对 RRF 候选池按"与问题的真实相关性"精排，取 top_n。
+
+    默认用 LLM(当前大脑)精排（只看每段前 180 字）；RERANK_PROVIDER=api 时用云端 bge-reranker-v2-m3
+    （硅基流动免费版，每段看 1500 字，与原名次融合），出错回退 LLM。
+    RERANK_ENABLED=false 关闭；都失败则回退 RRF 原序。
+    """
+    import os as _os
+    if not candidates:
+        return candidates
+    if (_os.getenv("RERANK_ENABLED", "true").lower() in ("0", "false", "no")
+            or len(candidates) <= top_n):
+        return candidates[:top_n]
+    if _rerank_provider() == "api":
+        try:
+            return _rerank_api(question, candidates, top_n)
+        except Exception as e:
+            print(f"⚠️  云端重排序失败，改用 LLM 精排：{type(e).__name__}: {e}")
+    try:
+        from llama_index.core import Settings
+        if Settings.llm is None:
+            return candidates[:top_n]
+        listing = "\n".join(
+            f"[{i}] 《{c.get('doc_name', '')}》{c.get('section_title', '') or ''}："
+            f"{(c.get('text', '') or '')[:180]}"
+            for i, c in enumerate(candidates))
+        prompt = (f"下面是检索到的资料片段。挑出对回答问题最相关的，按相关性从高到低排序，"
+                  f"只输出编号（逗号分隔，最多 {top_n} 个），不要解释、不要输出别的。\n\n"
+                  f"问题：{question}\n\n候选片段：\n{listing}\n\n最相关编号：")
+        resp = str(Settings.llm.complete(prompt)).strip()
+        import re as _re
+        order, seen = [], set()
+        for x in _re.findall(r"\d+", resp):
+            i = int(x)
+            if 0 <= i < len(candidates) and i not in seen:
+                seen.add(i)
+                order.append(candidates[i])
+            if len(order) >= top_n:
+                break
+        # LLM 漏选的按 RRF 原序补齐
+        for i, c in enumerate(candidates):
+            if len(order) >= top_n:
+                break
+            if i not in seen:
+                order.append(c)
+        return order[:top_n] if order else candidates[:top_n]
+    except Exception:
+        return candidates[:top_n]
 
 
 def _retrieve_semantic(eng: dict, question: str, user, top_k: int) -> list:
@@ -547,6 +673,18 @@ def _build_context(merged_results: list, mode: str = "qa") -> tuple:
     return context, citations, citations_data, True
 
 
+_TOOL_LABELS = {
+    "troubleshooting_lookup": "查 Troubleshooting 表",
+    "error_code_lookup": "查错误码",
+    "keyword_search": "关键词搜资料",
+    "semantic_search": "按意思搜资料",
+    "fault_history_lookup": "查故障履历",
+    "inspect_diagram": "看电路图",
+    "trace_connection": "在电路图里追线",
+    "netlist_trace": "按线表追线",
+}
+
+
 def _agent_query_stream(question: str, history: list = None):
     """把 ReAct agent 的事件流适配成 query_stream 的 5 元组契约。
 
@@ -554,30 +692,92 @@ def _agent_query_stream(question: str, history: list = None):
     非 final：把「推理轨迹（工具调用/观察）+ 最终答案」作为 delta 累积显示；
     final：给出去重后的引用。
     """
-    from src.agent import run_agent_sync
+    from src.agent import run_agent_sync, ReActStreamParser
+    from src.progress import report
 
     yield "🔍 **多步排查中……**\n\n", False, [], [], True
+    report("多步排查：规划排查步骤中")
 
+    parser = ReActStreamParser()
     final = None
+    step = 0
+    thought_open = False   # 当前这行 💭 还没换行
+    answer_open = False    # 已经开始逐字输出结论
+
+    def show(pieces):
+        """把解析出的思考/结论片段变成要追加到界面上的文字。"""
+        nonlocal thought_open, answer_open
+        out = ""
+        for kind, text in pieces:
+            if kind == "thought":
+                text = text.replace("\n", " ")
+                if not thought_open:
+                    text = text.lstrip()
+                    if not text:
+                        continue
+                    out += "💭 "
+                    thought_open = True
+                out += text
+            else:
+                if thought_open:
+                    out += "\n"
+                    thought_open = False
+                if not answer_open:
+                    out += "\n---\n\n"
+                    answer_open = True
+                    report("正在输出结论")
+                out += text
+        return out
+
+    def close_thought():
+        nonlocal thought_open
+        if thought_open:
+            thought_open = False
+            return "\n"
+        return ""
+
     for ev in run_agent_sync(question, history):
         kind = ev["kind"]
+        if kind == "stream":
+            text = show(parser.feed(ev["delta"]))
+            if text:
+                yield text, False, [], [], True
+            continue
+        if kind == "step":
+            text = show(parser.flush()) + close_thought()
+            parser.reset()
+            if text:
+                yield text, False, [], [], True
+            continue
         if kind == "tool_call":
+            step += 1
+            report(f"多步排查第 {step} 步：{_TOOL_LABELS.get(ev['tool'], ev['tool'])}")
             args = "，".join(f"{k}={v}" for k, v in ev["args"].items())
-            yield f"🔧 `{ev['tool']}`（{args}）\n", False, [], [], True
+            yield show(parser.flush()) + close_thought() + f"🔧 `{ev['tool']}`（{args}）\n", False, [], [], True
         elif kind == "observation":
+            report(f"多步排查：第 {step} 步查完，分析结果中")
             out = (ev["output"] or "").strip().replace("\n", " ")[:100]
             yield f"　↳ {out}…\n", False, [], [], True
         elif kind == "answer":
             final = ev
-            yield "\n---\n\n" + ev["text"], False, [], [], True
+            tail = show(parser.flush())
+            if parser.answer_started and parser.answer_text.strip():
+                if tail:
+                    yield tail, False, [], [], True   # 结论已经逐字输出过，不再重复贴
+            else:
+                text = (ev["text"] or "").strip()
+                if not text:   # 模型只吐了工具调用标记（已被过滤）、没写结论
+                    text = "⚠️ 这一轮没整理出结论（模型输出异常）。上面是已查到的线索，请再发一次问题。"
+                prefix = "" if answer_open else close_thought() + "\n---\n\n"
+                yield tail + prefix + text, False, [], [], True
         elif kind == "error":
-            yield f"\n\n⚠️ Agent 执行出错：{ev['error']}", True, [], [], False
+            yield close_thought() + f"\n\n⚠️ Agent 执行出错：{ev['error']}", True, [], [], False
             return
 
     if final:
         yield "", True, final["citations"], final["citations_data"], final["has_result"]
     else:
-        yield "", True, [], [], False
+        yield "\n\n⚠️ 排查中途结束，没有得出结论，请稍后重发。", True, [], [], False
 
 
 def query_stream(question: str, mode: str = "qa", history: list = None, user=None):
@@ -587,9 +787,12 @@ def query_stream(question: str, mode: str = "qa", history: list = None, user=Non
     """
     from src.prompts import KNOWLEDGE_QA_PROMPT, TROUBLESHOOTING_PROMPT, NO_RESULT_RESPONSE
     from src.router import should_use_agent
+    from src.agent import history_text
     from llama_index.core import Settings
     from src import acl
 
+    from src.error_code import annotate
+    question = annotate(question)         # 贴了报警界面原文（STG - FATAL - E Detail: …）→ 注明 STG-10-17
     if user is None:                      # 上层（如 Gradio chat）可能已绑 contextvar
         user = acl.get_current_user()
     _tok = acl.set_current_user(user)
@@ -613,13 +816,19 @@ def query_stream(question: str, mode: str = "qa", history: list = None, user=Non
             turns = []
             for msg in recent:
                 role = "工程师" if msg["role"] == "user" else "助手"
-                turns.append(f"{role}：{msg['content'][:400]}")
+                turns.append(f"{role}：{history_text(msg.get('content'))[:400]}")
             history_prefix = "【对话历史（最近几轮）】\n" + "\n".join(turns) + "\n\n"
 
         prompt_tmpl = TROUBLESHOOTING_PROMPT if mode == "troubleshoot" else KNOWLEDGE_QA_PROMPT
         final_prompt = prompt_tmpl.format(context=context, query=history_prefix + question)
 
+        from src.progress import report
+        report(f"整理答案：参考 {len(citations)} 份资料，生成回答中")
+        first = True
         for token in Settings.llm.stream_complete(final_prompt):
+            if first:
+                report("正在输出答案")
+                first = False
             yield token.delta, False, [], [], True
 
         yield "", True, citations, citations_data, True
