@@ -193,7 +193,13 @@ def build_llm(provider_id: str, model: str):
         # 用 OpenAILike：不校验模型名是否属于 OpenAI 官方列表，适配各家兼容接口。
         from llama_index.llms.openai_like import OpenAILike
         sync, asyncc = _httpx_clients(p["use_proxy"])
+        extra = {}
+        if provider_id == "deepseek" and os.getenv("DEEPSEEK_THINKING", "off").lower() in ("off", "0", "false", "no"):
+            # deepseek-v4 默认每一步先在后台长时间「思考」（不显示），智能体第一步常要 30~90 秒，网页上像卡住。
+            # 智能体本来就把推理写在 Thought 里，后台思考是重复的，默认关掉（2026-10-17）。DEEPSEEK_THINKING=on 打开
+            extra = {"extra_body": {"thinking": {"type": "disabled"}}}
         return OpenAILike(
+            additional_kwargs=extra,
             model=model,
             api_base=p["base_url"],
             api_key=key,
