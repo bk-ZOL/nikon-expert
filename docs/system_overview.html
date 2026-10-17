@@ -1,0 +1,257 @@
+<title>Nikon Expert 系统总览</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600;900&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* 版式：像一张设备技术资料的封面 + 正文——顶部是标题和规模数字，往下依次是全景导图、资料流转、提问流程、规矩和日程。
+   配色取 KrF 准分子激光 248nm 的深紫外紫，配冷灰底；状态色只用在「本地 / 云端」标记上。 */
+:root {
+  --bg: #f6f6f9;
+  --panel: #ffffff;
+  --ink: #1d1b2a;
+  --muted: #5d5a70;
+  --line: #dddbe7;
+  --accent: #5a3fd1;
+  --accent-soft: #ece8fb;
+  --local: #1f7a55;
+  --local-soft: #e3f3ea;
+  --cloud: #9a5b12;
+  --cloud-soft: #f8ecd9;
+  --font-display: "Noto Serif SC", "Songti SC", "STSong", serif;
+  --font-body: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14131c; --panel: #1d1b29; --ink: #ecebf4; --muted: #a6a3ba; --line: #34314a;
+    --accent: #a593ff; --accent-soft: #2a2546; --local: #6fd3a6; --local-soft: #183428;
+    --cloud: #e9b067; --cloud-soft: #3a2b17; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14131c; --panel: #1d1b29; --ink: #ecebf4; --muted: #a6a3ba; --line: #34314a;
+  --accent: #a593ff; --accent-soft: #2a2546; --local: #6fd3a6; --local-soft: #183428;
+  --cloud: #e9b067; --cloud-soft: #3a2b17; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.7;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 32px 64px;
+}
+.wrap { max-width: 1080px; margin: 0 auto; display: flex; flex-direction: column; gap: 48px; }
+header { display: flex; flex-direction: column; gap: 14px; border-bottom: 1px solid var(--line); padding-bottom: 28px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+h1 { font-family: var(--font-display); font-weight: 900; font-size: clamp(30px, 5vw, 46px); line-height: 1.2; margin: 0; text-wrap: balance; }
+.lede { color: var(--muted); max-width: 62ch; margin: 0; font-size: 16px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 8px; }
+.stat { border-left: 3px solid var(--accent); padding: 2px 0 2px 12px; min-width: 0; }
+.stat b { display: block; font-family: var(--font-mono); font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--muted); font-size: 13px; }
+section { display: flex; flex-direction: column; gap: 14px; }
+h2 { font-family: var(--font-display); font-weight: 600; font-size: 22px; margin: 0; text-wrap: balance; display: flex; align-items: baseline; gap: 10px; }
+h2 .no { font-family: var(--font-mono); font-size: 13px; color: var(--accent); font-weight: 600; }
+.note { color: var(--muted); margin: 0; max-width: 70ch; }
+.diagram { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; overflow-x: auto; }
+.diagram pre.mermaid { margin: 0; background: transparent; min-width: 640px; display: flex; justify-content: center; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.card h3 { margin: 0; font-size: 16px; }
+.card p, .card ul { margin: 0; color: var(--muted); }
+.card ul { padding-left: 1.2em; }
+.tbl { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; min-width: 560px; }
+th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; letter-spacing: .06em; color: var(--muted); font-weight: 500; }
+tr:last-child td { border-bottom: 0; }
+.tag { display: inline-block; font-family: var(--font-mono); font-size: 12px; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+.tag.local { background: var(--local-soft); color: var(--local); }
+.tag.cloud { background: var(--cloud-soft); color: var(--cloud); }
+.tag.no { background: var(--accent-soft); color: var(--accent); }
+.timeline { display: flex; flex-direction: column; gap: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.tl { display: grid; grid-template-columns: 150px 1fr; gap: 16px; padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.tl:last-child { border-bottom: 0; }
+.tl time { font-family: var(--font-mono); font-size: 13px; color: var(--accent); font-variant-numeric: tabular-nums; }
+.tl div { min-width: 0; }
+.tl b { display: block; font-weight: 500; }
+.tl span { color: var(--muted); font-size: 14px; }
+footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); padding-top: 16px; }
+code { font-family: var(--font-mono); font-size: 13px; background: var(--accent-soft); padding: 0 5px; border-radius: 4px; }
+@media (max-width: 560px) { .tl { grid-template-columns: 1fr; gap: 2px; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Nikon NSR · 现场知识系统 · 2026-10</div>
+    <h1>Nikon Expert 系统总览</h1>
+    <p class="lede">给 Nikon NSR 光刻机现场工程师用的知识系统：问故障、查报警、找操作步骤、追接线，回答都标出处。资料来自 WPS、飞书和本地文件，自动同步、自动提炼，夜里用本地模型整理经验。</p>
+    <div class="stats">
+      <div class="stat"><b>700</b><span>份资料（手册、检查表、SOP、电路图、履历）</span></div>
+      <div class="stat"><b>22.9 万</b><span>条语义向量</span></div>
+      <div class="stat"><b>3,709</b><span>个完整操作流程</span></div>
+      <div class="stat"><b>2,375</b><span>条故障排查经验</span></div>
+      <div class="stat"><b>8,324</b><span>条 S207D 线表连接</span></div>
+    </div>
+  </header>
+
+  <section>
+    <h2><span class="no">01</span>全景图</h2>
+    <p class="note">从中间往外看：资料从哪来、进库时做什么、变成哪些知识、谁在什么入口用它，以及两条贯穿始终的规矩（保密、自动化）。</p>
+    <div class="diagram">
+<pre class="mermaid">
+mindmap
+  root((Nikon Expert<br/>光刻机现场知识系统))
+    资料来源
+      WPS 知识库
+        原厂手册 / 检查表
+        电路图 / 表格
+      飞书知识库
+        装机调试履历
+        自编 SOP / 知识整理
+      本地文件
+        一次性去重入库
+    入库处理
+      按格式解析
+        PDF / Word / Excel / md
+        截图 OCR
+      判断机型
+        封面 / 文档编号 / 正文
+      权限定级
+        类别 / 密级 / 机型 / 客户
+      电路图识图
+        OCR + 矢量字形识读
+    知识库
+      全文索引
+        关键词 / 报警码
+      语义向量
+        bge-m3 中英日跨语言
+      SOP 目录
+        完整流程 按原文顺序
+      缩写对照表
+        RR → Reticle Rotation
+      线表
+        接插件 → 线缆 → 对端
+      Troubleshooting 表
+        原厂对策 + 现场经验
+    使用入口
+      网页
+        对话 / SOP 速查
+        错误码 / TS 表 / 工作日志
+      Claude MCP
+        13 个工具
+      多步排查智能体
+        想一步 查一步
+    夜间提炼
+      Mac 本地模型 gemma4
+      现场履历 → 现场案例
+      手册 日文检查表 → 原厂条目
+      SOP 按模块分类
+      人工确认后才生效
+    规矩
+      大批量任务只用本地模型
+      问答用 deepseek
+      向量化用硅基流动
+      同样内容只处理一次
+</pre>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="no">02</span>资料怎么流转</h2>
+    <p class="note">分工：自己写、持续更新的放飞书；手册、PDF、表格、电路图放 WPS。改过的文件整篇替换旧版，删掉的同步删除，不会新旧两份并存。</p>
+    <div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  subgraph S[资料来源]
+    W[WPS 知识库<br/>每 30 分钟]
+    F[飞书知识库<br/>每 30 分钟]
+    L[本地文件<br/>手动]
+  end
+  subgraph I[入库]
+    P[解析 + OCR] --> M[判断机型] --> A[权限定级]
+  end
+  subgraph K[知识库]
+    FT[(全文索引)]
+    VE[(语义向量)]
+    SO[(SOP 目录)]
+    GL[(缩写对照表)]
+    TS[(Troubleshooting 表)]
+  end
+  subgraph N[夜间提炼 · Mac 本地模型]
+    EX[提炼故障经验<br/>SOP 分模块]
+  end
+  W --> P
+  F --> P
+  L --> P
+  A --> FT
+  A --> VE
+  A --> SO
+  A --> GL
+  FT --> EX
+  EX -->|待确认| TS
+  K --> U[网页 / Claude / 智能体]
+</pre>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="no">03</span>一次提问是怎么回答的</h2>
+    <p class="note">简单问题直接检索回答；问故障、问「怎么做 / 步骤」的交给多步排查智能体，它自己决定查什么、查几轮，每个结论标来源。</p>
+    <div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  Q[工程师提问] --> G[缩写展开<br/>RR → Reticle Rotation / レチクルローテーション]
+  G --> R{问故障 / 问步骤 / 复合问题？}
+  R -->|否| FAST[快速检索<br/>全文 + 语义 → 机型加权 → 精排]
+  R -->|是| AG[多步排查智能体]
+  AG --> T1[Troubleshooting 表<br/>现场验证过的经验]
+  AG --> T2[错误码<br/>STG-29-80 自动换算]
+  AG --> T3[操作步骤目录<br/>完整流程]
+  AG --> T4[手册 / 履历检索]
+  AG --> T5[电路图 / 线表追线]
+  T1 & T2 & T3 & T4 & T5 --> AG
+  FAST --> ANS[回答 + 出处]
+  AG --> ANS
+</pre>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="no">04</span>能用来做什么</h2>
+    <div class="grid2">
+      <div class="card"><h3>查故障</h3><p>报警码或现象一问，先给现场处理过、真正有效的措施和发生次数，再补原厂对策和手册原文，连走过的弯路也列出来。</p></div>
+      <div class="card"><h3>找操作步骤</h3><p>「AIS 电压怎么调」「wafer loader 机械手清洁」：直接给出手册或 SOP 里的完整流程，按原文顺序，可以一键整理成中文 SOP。</p></div>
+      <div class="card"><h3>追接线</h3><p>给一个接插件号或线缆号，按线表一跳一跳追到对端设备和针脚，附图纸页码。</p></div>
+      <div class="card"><h3>看现场进展</h3><p>实时读各现场的装机调试履历；历史履历里的故障经验夜里自动整理进 Troubleshooting 表。</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="no">05</span>保密规矩</h2>
+    <p class="note">资料里有原厂机密和客户信息，哪些环节可以用云端服务是定死的。</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>环节</th><th>用什么</th><th>为什么</th></tr></thead>
+        <tbody>
+          <tr><td>大批量提炼、抽取</td><td><span class="tag local">本地</span> Mac 上的 gemma4</td><td>整批资料一个字都不出自己的设备；Mac 不可用就停，不会退回云端</td></tr>
+          <tr><td>网页问答、整理一篇 SOP</td><td><span class="tag cloud">云端</span> deepseek</td><td>每次只发检索到的几段原文</td></tr>
+          <tr><td>向量化</td><td><span class="tag cloud">云端</span> 硅基流动 bge-m3</td><td>条款写明不用于训练、算完立即销毁</td></tr>
+          <tr><td>Anthropic API</td><td><span class="tag no">不用</span></td><td>条款不允许中国控股公司使用</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="no">06</span>每天自动发生的事</h2>
+    <div class="timeline">
+      <div class="tl"><time>每 30 分钟</time><div><b>同步 WPS 和飞书</b><span>新增入库、改过的替换、删掉的同步删除；顺带刷新 SOP 目录和缩写对照表</span></div></div>
+      <div class="tl"><time>每天</time><div><b>刷新飞书授权</b><span>保持能读飞书文档</span></div></div>
+      <div class="tl"><time>00:00 – 06:30</time><div><b>夜间提炼</b><span>Mac 在线且空闲才跑：履历 → 现场案例，手册和日文检查表 → 原厂条目，SOP 分模块；同样内容只做一次，履历只做新增和改过的天</span></div></div>
+      <div class="tl"><time>03:30</time><div><b>电路图识图兜底</b><span>新入库的电路图补识接插件号（入库时也会立刻触发）</span></div></div>
+      <div class="tl"><time>白天</time><div><b>人工确认</b><span>管理员在「Troubleshooting 表」确认提炼出的条目，确认后才给其他账号看、才被智能体引用</span></div></div>
+    </div>
+  </section>
+
+  <footer>Nikon Expert · 系统说明见仓库 README.md，交接细节见 CLAUDE.md。数据截至 2026-10-17。</footer>
+</div>
