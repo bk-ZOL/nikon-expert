@@ -255,6 +255,9 @@ def whole_doc(rows, doc_name: str) -> dict:
             continue
         steps.append({"n": len(steps) + 1, "text": head or "（概要）", "detail": body})
     title = re.sub(r"\.(docx?|md|pdf|xlsx?)$", "", doc_name, flags=re.I)
+    head = _clean(rows[0]["section_title"] or "") if rows else ""
+    if _SOP_NAME_RE.search(head) and len(head) <= 120 and head != doc_name:
+        title = f"{head}（{title}）"               # 第一个标题比文件名（07-RR）说得清楚
     if steps and steps[0]["text"] in ("（概要）", doc_name):
         first = steps[0]["detail"].split("\n")[0].strip()
         if 4 <= len(first) <= 80 and not first.startswith("【截图文字】"):
@@ -347,7 +350,9 @@ def build(fts_path: str = None, only_doc: str = None, embed: bool = True, log=pr
         name = r0["doc_name"]
         if r0["doc_type"] != "sop" and _SKIP_NAME_RE.search(name):
             return
-        if r0["doc_type"] == "sop" or _SOP_NAME_RE.search(name) or (r0["doc_type"] == "checksheet" and _PROC_NAME_RE.search(name)):
+        head = _clean(r0["section_title"] or "")
+        # 文件名没写 SOP、但第一个标题就是「SOP — Reticle Rotation (RR) Measurement」的（如 PM 手顺 SOP Pack 的 07-RR.pdf）也整份收录
+        if r0["doc_type"] == "sop" or _SOP_NAME_RE.search(name) or (_SOP_NAME_RE.search(head) and len(head) <= 120) or (r0["doc_type"] == "checksheet" and _PROC_NAME_RE.search(name)):
             procs = [whole_doc(rows, name)]          # 文件名就是一份 SOP / 某个作业方法：整份算一个，不拆
         else:
             procs = split_procedures(rows)
@@ -626,7 +631,8 @@ def organize(p: dict, question: str = "") -> str:
     """用大模型把原文步骤整理成中文 SOP（只整理、不补内容）。"""
     from src.ts_table import _llm
     body = format_text(p, md=False, detail_chars=-1, max_chars=24000)
-    return _llm(ORGANIZE_PROMPT.format(cite=cite(p), title=p["title"], question=question or "（无）", body=body))
+    # 网页上点一下整理一篇，算问答类单次使用，照常用 deepseek（批量任务才走本地模型）
+    return _llm(ORGANIZE_PROMPT.format(cite=cite(p), title=p["title"], question=question or "（无）", body=body), bulk=False)
 
 
 def lookup_for_agent(query: str, user=None, want_models=None, k: int = 3) -> str:

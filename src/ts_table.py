@@ -130,11 +130,12 @@ def _parse_json(text: str, kind="list"):
         return [] if kind == "list" else {}
 
 
-def _llm(prompt: str) -> str:
+def _llm(prompt: str, bulk: bool = True) -> str:
     """直接调 OpenAI 兼容接口（deepseek）。默认思考档会把 max_tokens 全用在思考上、正文为空，
     所以思考档设 low（TS_REASONING，off=关闭思考），输出上限放宽（TS_MAX_TOKENS）。
-    TS_LLM=local：改用 Mac 上的本地模型（src/local_llm.py，资料不出自己的设备）；Mac 不可用就报错，不退回云端。"""
-    if os.getenv("TS_LLM", "").lower() == "local":
+    TS_LLM=local：改用 Mac 上的本地模型（src/local_llm.py，资料不出自己的设备）；Mac 不可用就报错，不退回云端。
+    规矩（用户 2026-10-17 定）：大批量任务不用 deepseek；网页上点一下处理一篇的（bulk=False，如整理成中文 SOP）照常用 deepseek。"""
+    if bulk and os.getenv("TS_LLM", "").lower() == "local":
         from src import local_llm
         ok, why = local_llm.available(require_idle=False)
         if not ok:
