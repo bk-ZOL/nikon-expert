@@ -257,7 +257,7 @@ def whole_doc(rows, doc_name: str) -> dict:
     title = re.sub(r"\.(docx?|md|pdf|xlsx?)$", "", doc_name, flags=re.I)
     if steps and steps[0]["text"] in ("（概要）", doc_name):
         first = steps[0]["detail"].split("\n")[0].strip()
-        if 4 <= len(first) <= 80:
+        if 4 <= len(first) <= 80 and not first.startswith("【截图文字】"):
             title = f"{first}（{title}）"
     return {"title": title, "breadcrumb": "", "intro": "", "steps": steps, "page": "",
             "rid_start": rows[0]["rid"] if rows else 0, "rid_end": rows[-1]["rid"] if rows else 0,
