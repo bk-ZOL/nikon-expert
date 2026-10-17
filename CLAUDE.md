@@ -159,6 +159,19 @@
 - **更新**：WPS 同步有入库、删除或改名时，`sync_kwiki.py` 末尾自动跑 `sop_index.build()`（拆分几秒，只给内容变了的流程重算向量）。手动跑：`.venv/bin/python scripts/build_sop_index.py`，`--show "查询词"` 看检索结果。
 - 现状：357 份资料，3692 个流程。已知不足：PDF 转文字时丢了标题的小节，步骤会挂在上一个小节下面；只有截图的资料（`拆机SOP（S207）` 等）还是拆不出内容（见待办 7）。
 
+## 8.8 2026-10-17 飞书全库同步、缩写对照表、夜间本地提炼
+
+- **飞书**：`scripts/sync_feishu.py` 同步整个知识库「NIKON NSR 205/206/207」（以前只同步一篇工作日志），由 `nikon-feishu-sync.timer` 每 30 分钟跑一次，WPS 同步在跑时这一轮跳过。用户定的分工：**自己写、持续更新的放飞书，其他文件放 WPS**。标题带履历 / 日志的按天入库，SOP 进 SOP 速查，「个人业务量化」排除。两篇履历在权限上是「待复核」（原来就是这样），对话检索不到，「工作日志」页面是实时读飞书。
+- **缩写对照表**（`src/glossary.py`、`config/glossary.tsv`）：起因是「RR 怎么测」答不上来（RR = Reticle Rotation，Error Code List 里还有几百处机械手的 RR-axis）。自动挖「全称 (缩写)」和资料里现成的对照表；日文 / 中文只信对照表和人工表。全文检索、语义检索、SOP 速查都会补搜全称，智能体提问时附术语提示。`scripts/build_glossary.py --missing` 列出常用但没收录的缩写（TPR、RB、INC、SUP、LLTC3… 要用户补）。
+- **SOP 目录**：第一个标题像 SOP 的文档也整份收录（PM 手顺 SOP Pack 的 `07-RR.pdf` 这类）。
+- **夜间提炼改用本地模型**：deepseek 的条款里没有保密承诺（隐私政策写的是输入「可能」用于训练）；Anthropic 不对中国控股公司开放（Supported Countries 条款），所以都不用。改成**用户 Mac 上的 gemma4**：
+  - Mac：Ollama 0.40.4 在 `~/Applications/ollama-0.40.4`（brew 被墙，是从 GitHub 官方 release 下载并核对 sha256 的），由 LaunchAgent `com.jayce.ollama-tailnet` 启动，**只监听 Tailscale 地址 100.89.146.17:11434**。
+  - 服务器：`src/local_llm.py` 先检查 Mac 在线、空闲 10 分钟以上（经 ssh mac 读 HIDIdleTime）才调用；`src/kb_extract.py` 做三件事：手册 / 日文 checksheet 的异常处理 → 原厂条目（待确认）、现场履历 → 现场案例、SOP 流程分模块。由 `nikon-kb-extract.timer` 在北京时间 00:00~06:30 每半小时试一次，可以中断，下次接着做。
+  - `.env` 设了 `TS_LLM=local`，原来每天用 deepseek 抽取的 `nikon-ts-extract.timer` 已停用。本地模型不可用时直接报错，**不会退回 deepseek**。
+  - gemma4 不太听细规则，所以在程序里硬处理：「Countermeasure 8」这类引用按同一份资料的对策表换成具体内容，空壳条目丢掉，模型给「其他」时按资料名定模块。
+  - 量：4364 个窗口（S207D 3039 个优先），每个 10 秒到 2 分钟不等。
+- 日常问答仍用 deepseek（每次发几段原文）。用户知道这个风险，暂时没改。
+
 ## 9. 用户的习惯
 
 - 中文交流，不喜欢"AI 味"，回答要口语、直白。
