@@ -122,6 +122,7 @@ def mine(rows) -> dict:
     loc = defaultdict(Counter)                      # 缩写 → 日文/中文计数
     docs = defaultdict(set)
     table_hits = defaultdict(Counter)
+    table_pairs = defaultdict(lambda: defaultdict(set))   # 缩写 → 同一行的英文全称 → 同一行的日文 / 中文
     for name, text in rows:
         t = re.sub(r"<br>", " ", text or "")
         for m in _EN_BEFORE.finditer(t):
@@ -142,6 +143,10 @@ def mine(rows) -> dict:
         for ab, cells in _tables(t):
             if ab in _SKIP:
                 continue
+            row_en = next((c.strip() for c in cells[:3] if _lang(c) == "en" and c.strip()), "")
+            for c in cells[:2]:
+                if _lang(c) in ("ja", "zh") and len(c.strip()) <= 20:
+                    table_pairs[ab][row_en.lower()].add(c.strip())
             for c in cells[:3]:
                 c = c.strip()
                 if not c or len(c) > 60:
@@ -161,21 +166,20 @@ def mine(rows) -> dict:
             norm = lambda x: re.sub(r"[\s\-]+", " ", x.lower()).strip()
             key = next((k for k in merged if norm(k) == norm(f)), f)
             merged[key] += n
-        local = Counter({f: n for f, n in loc[ab].items() if n >= 2 and _lang(f) == "ja"})
-        for f, n in table_hits[ab].items():
-            if _lang(f) in ("ja", "zh") and len(f) <= 20:
-                local[f] += n
-        if not merged and not local:
+        if not merged and not table_pairs[ab]:
             continue
-        ja = [f for f, _ in local.most_common() if _lang(f) == "ja"][:3]
-        zh = [f for f, _ in local.most_common() if _lang(f) == "zh"][:3]
-        senses = [{"en": f, "n": n} for f, n in merged.most_common(3)]
-        if not senses:
-            senses = [{"en": "", "n": sum(local.values())}]
-        # 日文/中文挂到出现最多的那个意思上（不知道哪个对应哪个时，宁可只挂第一个）
-        senses[0]["ja"], senses[0]["zh"] = ja, zh
+        senses = [{"en": f, "n": n, "ja": [], "zh": []} for f, n in merged.most_common(3)]
+        # 对照表里的日文 / 中文只挂到同一行的那个英文意思上；那一行没写英文的，单独算一个意思
+        for row_en, names in table_pairs[ab].items():
+            target = next((s for s in senses if s["en"].lower() == row_en and row_en), None)
+            if target is None and row_en:
+                continue
+            if target is None:
+                target = {"en": "", "n": 3, "ja": [], "zh": []}
+                senses.append(target)
+            for x in sorted(names):
+                target["ja" if _lang(x) == "ja" else "zh"].append(x)
         for s in senses:
-            s.setdefault("ja", []), s.setdefault("zh", [])
             s["src"] = "auto"
         out[ab] = {"senses": senses, "docs": sorted(docs[ab])[:5]}
     return out
