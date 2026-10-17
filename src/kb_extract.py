@@ -39,6 +39,8 @@ OEM_PROMPT = """你在整理 Nikon 光刻机的故障排查知识。下面是一
 3. actions 按原文顺序，一步一条；原文写「联系 Nikon / F・L / 担当技術」也照写。
 4. unit 只能从这里选一个：{units}
 5. 原文写的是前提条件（如「社内工程の場合」「納入時のみ」）放进 actions 那一步里，不要当成原因。
+6. 处理办法只是一个编号或引用（如「Countermeasure 8」「参照 4.3 节」「→ Table 5」），而这段原文里没写具体做法的，**不要抽这一条**。
+7. 这份资料主要讲：{hint}。拿不准 unit 时按这个选。
 
 每个元素：{{"unit": "…", "symptom": "异常现象或报警，一句话", "error_code": "报警码（原文有才写）",
  "causes": ["原因1", …], "actions": ["处理/确认步骤1", …], "criteria": "判定标准/规格值（原文有才写）",
@@ -57,6 +59,23 @@ UNIT_PROMPT = """下面是 Nikon 光刻机（NSR-S207D 等）手册里的操作�
 """
 
 
+_UNIT_HINTS = [  # 资料名里的关键词 → 这份资料主要讲的模块（给模型一个默认）
+    (r"laser|excimer|cymer|gigaphoton", "Laser"), (r"avis", "AVIS"), (r"wafer loader|\bwl\b", "WL"),
+    (r"reticle loader|\brl\b|smif|pod", "RL"), (r"inline|foup|oht", "Inline"),
+    (r"temperature controller|chamber|atc|ffu|空調", "Chamber"), (r"lens control|\blc\b", "LC"),
+    (r"interferometer|干渉計", "干涉计"), (r"illumination|照明", "Illumination"), (r"\bbmu\b", "BMU"),
+    (r"alignment|fia|lsa|\balg\b", "ALG"), (r"\bais\b", "AIS"), (r"focus|\baf\b", "AF"),
+    (r"stage|\bws\b|\brs\b", "WS"), (r"mcsv|software|operation guide|command", "主机/PC"),
+]
+
+
+def _hint(doc: str) -> str:
+    for pat, unit in _UNIT_HINTS:
+        if re.search(pat, doc, re.I):
+            return unit
+    return "看原文判断"
+
+
 def _conn():
     c = ts_table._conn()
     c.execute("CREATE TABLE IF NOT EXISTS kb_windows (hash TEXT PRIMARY KEY, kind TEXT, src_doc TEXT, n INTEGER, done_at TEXT)")
@@ -71,8 +90,17 @@ def _models(fts):
     return out
 
 
+_PRIO = {"S207D": 0, "COMMON": 1, "S206D": 2}
+
+
 def oem_windows():
-    """[(doc, machine, text, section, score)]：手册 / checksheet 按顺序拼成 ~2600 字的窗口，只留「异常 → 处理」写法够多的。"""
+    """[(doc, machine, text, section, score)]：先 S207D、再通用、再 S206D、最后其他机型；同一档里「异常 → 处理」写法越密越先做。"""
+    wins = list(_oem_windows_raw())
+    wins.sort(key=lambda w: (_PRIO.get(w[1], 3), -w[4]))
+    return wins
+
+
+def _oem_windows_raw():
     fts = sqlite3.connect(os.getenv("FTS_DB_PATH", "./data/fts.db"))
     models = _models(fts)
     names = [r[0] for r in fts.execute(
@@ -98,16 +126,58 @@ def oem_windows():
     fts.close()
 
 
+_REF_RE = re.compile(r"^\s*(?:countermeasure|対策|処置|remedy|action)\s*(?:no\.?\s*)?(\d{1,3})\s*$", re.I)
+_ONLY_REF_RE = re.compile(r"^\s*(?:see|refer to|参照|参考|→)?\s*(?:countermeasure|対策|section|table|表|chapter|第)?\s*"
+                          r"[\d.\-]+\s*(?:节|章|節|項)?\s*(?:を?参照)?\s*$", re.I)
+_DEF_RE = re.compile(r"(?:Countermeasure|対策|処置)\s*(?:No\.?\s*)?(\d{1,3})\**\s*\|\s*\**([^|*]{0,80}?)\**\s*\|"
+                     r"[\s|]*\|?\s*([^|]{8,600})\|", re.I)
+_REFS = {}
+
+
+def _doc_refs(doc: str) -> dict:
+    """这份资料里「Countermeasure N → 标题、内容」的对照（如激光器手册的 Table 4.4-2 Countermeasures）。"""
+    if doc not in _REFS:
+        fts = sqlite3.connect(os.getenv("FTS_DB_PATH", "./data/fts.db"))
+        refs = {}
+        for (t,) in fts.execute("SELECT text FROM doc_fts WHERE doc_name=? AND (text LIKE '%ountermeasure%' "
+                                "OR text LIKE '%対策%' OR text LIKE '%処置%')", (doc,)):
+            for m in _DEF_RE.finditer((t or "").replace("<br>", " ")):
+                body = re.sub(r"\s+", " ", m.group(3)).strip()
+                if len(body) >= 8 and m.group(1) not in refs:
+                    refs[m.group(1)] = (m.group(2).strip(), body)
+        fts.close()
+        _REFS[doc] = refs
+    return _REFS[doc]
+
+
+def _resolve_actions(doc: str, actions: list) -> list:
+    """只写了「Countermeasure 8」的步骤换成资料里写的具体内容；换不了、又只是个引用的，丢掉。"""
+    refs, out = _doc_refs(doc), []
+    for a in actions:
+        m = _REF_RE.match(a)
+        if m and m.group(1) in refs:
+            title, body = refs[m.group(1)]
+            out.append(f"{a}（{title}）：{body}" if title else f"{a}：{body}")
+        elif not _ONLY_REF_RE.match(a):
+            out.append(a)
+    return out
+
+
 def _add_oem(c, doc, machine, item) -> bool:
-    """一条抽取结果 → 原厂条目（status=pending，管理员确认后才给别人看、才被智能体引用）。"""
+    """一条抽取结果 → 原厂条目（status=pending，管理员确认后才给别人看、才被智能体引用）。
+    处理步骤只是引用编号、又查不到内容，而且没写原因的，不收（空壳条目没用）。"""
     sym = (item.get("symptom") or "").strip()
     if not sym:
         return False
     unit = item.get("unit") if item.get("unit") in ts_table.UNITS else "其他"
+    if unit == "其他" and _hint(doc) in ts_table.UNITS:
+        unit = _hint(doc)                  # 模型拿不准时按资料名定（激光器手册 → Laser）
     code = ts_table.norm_code(item.get("error_code") or "")
     causes = [str(x).strip() for x in item.get("causes") or [] if str(x).strip()]
-    actions = [str(x).strip() for x in item.get("actions") or [] if str(x).strip()]
+    actions = _resolve_actions(doc, [str(x).strip() for x in item.get("actions") or [] if str(x).strip()])
     crit = (item.get("criteria") or "").strip()
+    if not causes and not actions and not crit:
+        return False
     section = (item.get("section") or "").strip()
     steps = [{"check": a, "details": ""} for a in actions]
     if crit:
@@ -146,7 +216,7 @@ def run_oem(deadline: float, log=print) -> dict:
             break
         try:
             out = ts_table._parse_json(local_llm.chat(OEM_PROMPT.format(
-                doc=doc, machine=machine, units="、".join(ts_table.UNITS), text=text)))
+                doc=doc, machine=machine, units="、".join(ts_table.UNITS), hint=_hint(doc), text=text)))
         except Exception as ex:
             log(f"  ⚠️ {doc[:40]} 抽取失败：{type(ex).__name__}: {ex}")
             continue

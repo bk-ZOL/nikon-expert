@@ -50,8 +50,11 @@ def available(require_idle: bool = True) -> tuple:
     """(能不能用, 原因)。"""
     if not online():
         return False, "Mac 不在线（关机 / 睡眠 / Ollama 没起来）"
-    if require_idle:
+    if require_idle and IDLE_MIN > 0:
         idle = idle_seconds()
+        if idle is None:                   # Tailscale 偶尔丢一下，隔几秒再试一次
+            time.sleep(5)
+            idle = idle_seconds()
         if idle is None:
             return False, "查不到 Mac 空闲时间（ssh 不通）"
         if idle < IDLE_MIN * 60:
