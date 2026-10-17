@@ -12,7 +12,7 @@
 | 服务 | `nikon-expert.service`（Gradio 网页，端口 7860）、`nikon-mcp.service`（MCP，streamable-http） |
 | 定时器 | `nikon-wps-sync.timer`（每 30 分钟同步 WPS kwiki → 本地库）、`nikon-feishu-refresh.timer`（每天刷新飞书 token） |
 | 向量化 | 硅基流动 `BAAI/bge-m3`（**免费**，余额为 0 也能用）。`EMBED_API_KEY` 在服务器 `.env` |
-| 问答 LLM | deepseek-v4-flash |
+| 问答 LLM | deepseek-flash（DeepSeek-V4.1-Flash；旧名 deepseek-v4-flash 已下线，2026-10-18 改名） |
 | 存储 | Qdrant `nikon_expert_v1`（本机 6333）、全文索引 `data/fts.db`、线表 `data/netlist.db` |
 
 ## 2. 工作规矩（这几天踩过的坑）
