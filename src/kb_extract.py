@@ -191,22 +191,40 @@ def _lst(v) -> list:
     return [v] if isinstance(v, str) else list(v or [])
 
 
+_BR = re.compile(r"<br\s*/?>", re.I)
+_CODE_SEP = re.compile(r"[\s、；;，,/／｜|]+")
+_HAS_DIGIT = re.compile(r"\d")
+
+
+def _clean_text(v) -> str:
+    """正文里的 <br>（Excel 转出来的资料常见）换成空格。"""
+    return _BR.sub(" ", str(v or "")).strip()
+
+
+def _clean_codes(v) -> str:
+    """故障代码字段：模型常把原资料一整列码连 <br> 原样抄进来，拆成空格分隔的码。
+    没数字的词（「无」「座標系」这类）丢掉；太短的碎片（换行断码残留）也丢。"""
+    parts = [t for t in _CODE_SEP.split(_BR.sub(" ", str(v or ""))) if t]
+    codes = [t for t in parts if len(t) >= 4 and _HAS_DIGIT.search(t)]
+    return " ".join(codes)
+
+
 def _add_oem(c, doc, machine, item) -> bool:
     """一条抽取结果 → 原厂条目（status=pending，管理员确认后才给别人看、才被智能体引用）。
     处理步骤只是引用编号、又查不到内容，而且没写原因的，不收（空壳条目没用）。"""
-    sym = _txt(item.get("symptom"))
+    sym = _clean_text(_txt(item.get("symptom")))
     if not sym:
         return False
     unit = item.get("unit") if item.get("unit") in ts_table.UNITS else "其他"
     if unit == "其他" and _hint(doc) in ts_table.UNITS:
         unit = _hint(doc)                  # 模型拿不准时按资料名定（激光器手册 → Laser）
-    code = ts_table.norm_code(_txt(item.get("error_code")))
-    causes = [str(x).strip() for x in _lst(item.get("causes")) if str(x).strip()]
-    actions = _resolve_actions(doc, [str(x).strip() for x in _lst(item.get("actions")) if str(x).strip()])
-    crit = _txt(item.get("criteria"))
+    code = ts_table.norm_code(_clean_codes(_txt(item.get("error_code"))))
+    causes = [_clean_text(x) for x in _lst(item.get("causes")) if _clean_text(x)]
+    actions = _resolve_actions(doc, [a for a in (_clean_text(x) for x in _lst(item.get("actions"))) if a])
+    crit = _clean_text(_txt(item.get("criteria")))
     if not causes and not actions and not crit:
         return False
-    section = _txt(item.get("section"))
+    section = _clean_text(_txt(item.get("section")))
     steps = [{"check": a, "details": ""} for a in actions]
     if crit:
         steps.append({"check": f"判定标准：{crit}", "details": ""})
