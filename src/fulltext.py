@@ -44,26 +44,33 @@ def init_fts(db_path: str = None) -> sqlite3.Connection:
     _init_path = db_path
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    _conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)   # 写锁最多等 30 秒，不直接报错
-    _tls.conn = _conn
-    _conn.execute("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
-            doc_id, doc_name, doc_type, machine_model, section_title, text,
-            tokenize='trigram'
-        )
-    """)
-    _conn.execute("""
-        CREATE TABLE IF NOT EXISTS doc_meta (
-            doc_id TEXT PRIMARY KEY,
-            doc_name TEXT,
-            doc_type TEXT,
-            file_path TEXT,
-            machine_model TEXT,
-            ingested_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
-    _conn.commit()
-    return _conn
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
+    try:
+        conn.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
+                doc_id, doc_name, doc_type, machine_model, section_title, text,
+                tokenize='trigram'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS doc_meta (
+                doc_id TEXT PRIMARY KEY,
+                doc_name TEXT,
+                doc_type TEXT,
+                file_path TEXT,
+                machine_model TEXT,
+                ingested_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.commit()
+    except BaseException:
+        conn.close()
+        raise
+    # Publish only the fully initialized connection belonging to this thread.
+    _tls.conn = conn
+    _conn = conn  # Legacy alias; never use this shared alias during initialization.
+    return conn
+
 
 
 def _get_conn() -> sqlite3.Connection:
