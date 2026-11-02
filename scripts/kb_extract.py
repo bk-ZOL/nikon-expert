@@ -37,8 +37,9 @@ if a.minutes:
 else:
     hh, mm = (int(x) for x in os.getenv("KB_UNTIL", "06:30").split(":"))
     end = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-    if end <= now:
-        end += dt.timedelta(days=1)
+    if end <= now:                     # 已过收工时间（06:30 那次触发）：今晚到此为止，别算成明天 06:30
+        print(f"已过 {hh:02d}:{mm:02d}，今晚不跑")
+        sys.exit(0)
     deadline = end.timestamp()
 print(f"开始 {now:%F %T}（北京），最晚到 {dt.datetime.fromtimestamp(deadline, now.tzinfo):%F %T}")
 

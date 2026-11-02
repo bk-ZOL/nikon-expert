@@ -98,13 +98,21 @@ def _models(fts):
 _PRIO = {"S207D": 0, "COMMON": 1, "S206D": 2}
 # 专门讲故障的资料（エラー要因分析、REPAIR MANUAL、トラブル要因シート、Troubleshooting Guide）最有用，不分机型最先做
 _TROUBLE_DOC = re.compile(r"トラブル|要因|repair|troubleshoot|故障|エラー|error handling", re.I)
+# 用户当前最关心 308：讲故障的资料里插队到最前（临时提权，308 做完可删）
+_TROUBLE_FIRST = {"S308F": -1}
 
 
 def oem_windows():
-    """[(doc, machine, text, section, score)]：先做专门讲故障的资料（不分机型），再按 S207D → 通用 → S206D → 其他机型；
-    同一档里「异常 → 处理」写法越密越先做。"""
+    """[(doc, machine, text, section, score)]：先做专门讲故障的资料（点名机型最先 → S207D → 通用 → S206D → 其他机型），
+    再做其他资料（S207D → 通用 → S206D → 其他机型）；同一档里「异常 → 处理」写法越密越先做。"""
     wins = list(_oem_windows_raw())
-    wins.sort(key=lambda w: (0 if _TROUBLE_DOC.search(w[0]) else 1, _PRIO.get(w[1], 3), -w[4]))
+    def _key(w):
+        tr = 0 if _TROUBLE_DOC.search(w[0]) else 1
+        prio = _PRIO.get(w[1], 3)
+        if tr == 0 and w[1] in _TROUBLE_FIRST:
+            prio = _TROUBLE_FIRST[w[1]]
+        return (tr, prio, -w[4])
+    wins.sort(key=_key)
     return wins
 
 
@@ -171,22 +179,52 @@ def _resolve_actions(doc: str, actions: list) -> list:
     return out
 
 
+def _txt(v) -> str:
+    """模型有时把字符串字段给成列表（如 criteria: ["…", "…"]），统一拼成一行。"""
+    if isinstance(v, (list, tuple)):
+        return "；".join(str(x).strip() for x in v if str(x).strip())
+    return str(v or "").strip()
+
+
+def _lst(v) -> list:
+    """反过来，列表字段给成了单个字符串时，别按字逐个拆开。"""
+    return [v] if isinstance(v, str) else list(v or [])
+
+
+_BR = re.compile(r"<br\s*/?>", re.I)
+_CODE_SEP = re.compile(r"[\s、；;，,/／｜|]+")
+_HAS_DIGIT = re.compile(r"\d")
+
+
+def _clean_text(v) -> str:
+    """正文里的 <br>（Excel 转出来的资料常见）换成空格。"""
+    return _BR.sub(" ", str(v or "")).strip()
+
+
+def _clean_codes(v) -> str:
+    """故障代码字段：模型常把原资料一整列码连 <br> 原样抄进来，拆成空格分隔的码。
+    没数字的词（「无」「座標系」这类）丢掉；太短的碎片（换行断码残留）也丢。"""
+    parts = [t for t in _CODE_SEP.split(_BR.sub(" ", str(v or ""))) if t]
+    codes = [t for t in parts if len(t) >= 4 and _HAS_DIGIT.search(t)]
+    return " ".join(codes)
+
+
 def _add_oem(c, doc, machine, item) -> bool:
     """一条抽取结果 → 原厂条目（status=pending，管理员确认后才给别人看、才被智能体引用）。
     处理步骤只是引用编号、又查不到内容，而且没写原因的，不收（空壳条目没用）。"""
-    sym = (item.get("symptom") or "").strip()
+    sym = _clean_text(_txt(item.get("symptom")))
     if not sym:
         return False
     unit = item.get("unit") if item.get("unit") in ts_table.UNITS else "其他"
     if unit == "其他" and _hint(doc) in ts_table.UNITS:
         unit = _hint(doc)                  # 模型拿不准时按资料名定（激光器手册 → Laser）
-    code = ts_table.norm_code(item.get("error_code") or "")
-    causes = [str(x).strip() for x in item.get("causes") or [] if str(x).strip()]
-    actions = _resolve_actions(doc, [str(x).strip() for x in item.get("actions") or [] if str(x).strip()])
-    crit = (item.get("criteria") or "").strip()
+    code = ts_table.norm_code(_clean_codes(_txt(item.get("error_code"))))
+    causes = [_clean_text(x) for x in _lst(item.get("causes")) if _clean_text(x)]
+    actions = _resolve_actions(doc, [a for a in (_clean_text(x) for x in _lst(item.get("actions"))) if a])
+    crit = _clean_text(_txt(item.get("criteria")))
     if not causes and not actions and not crit:
         return False
-    section = (item.get("section") or "").strip()
+    section = _clean_text(_txt(item.get("section")))
     steps = [{"check": a, "details": ""} for a in actions]
     if crit:
         steps.append({"check": f"判定标准：{crit}", "details": ""})
