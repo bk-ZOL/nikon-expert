@@ -155,7 +155,47 @@ def _masked(history: list) -> list:
     return history[:-1] + [last]
 
 
-def chat(question: str, history: list, request: gr.Request = None):
+def _mesr_paths(files) -> list:
+    """Gradio 文件组件：单文件是路径字符串，多文件是列表。"""
+    if isinstance(files, str):
+        files = [files]
+    out = []
+    for f in files or []:
+        p = f if isinstance(f, str) else getattr(f, "name", "")
+        if p:
+            out.append(p)
+    return out
+
+
+def _bind_mesr(files, request=None, action="OVL 分析", clear_page_when_empty=True):
+    """把这次选中的 MESR 记进会话（对话和 OVL 页共用，不入库）。
+
+    页面上仍只列出这一次选中的文件，并默认打开第一份——和原来的 OVL 页一致。
+    对话里的文件框被清空时，不要把 OVL 页上已经打开的列表擦掉。
+    """
+    from src import ovl_view
+    paths = _mesr_paths(files)
+    key = ovl_view.session_key(request)
+    if paths:
+        _track(request, action)
+        ovl_view.remember_uploads(key, paths)
+    note = ovl_view.attach_message(key)
+    if not paths:
+        if not clear_page_when_empty:
+            return gr.update(), gr.update(), gr.update(), note
+        return (pd.DataFrame(), gr.update(choices=[], value=None),
+                "上传 MESR 文件（可以多选，`.MESR;5` 这类 VMS 文件名也行）。", note)
+    try:
+        df, choices = ovl_view.file_table(paths)
+    except Exception as e:
+        return gr.update(), gr.update(), f"已记住 {len(paths)} 个文件。读取失败：{e}", note
+    msg = f"共 {len(paths)} 个文件，下拉选一个查看。"
+    if action.startswith("对话"):
+        msg += " 对话里问叠对 / OVL / MESR 会用最近一份（不入库）。"
+    return df, gr.update(choices=choices, value=choices[0][1] if choices else None), msg, note
+
+
+def chat(question: str, history: list, mesr_files=None, request: gr.Request = None):
     if not question.strip():
         yield (history or []), "", ""
         return
@@ -188,6 +228,13 @@ def chat(question: str, history: list, request: gr.Request = None):
         yield _masked(new_history), "", ""
         return
     _tok = acl.set_current_user(_user)
+    try:
+        from src import ovl_view
+        _mesr = _mesr_paths(mesr_files)
+        if _mesr:
+            ovl_view.remember_uploads(ovl_view.session_key(), _mesr)
+    except Exception:
+        pass
 
     accumulated = ""
     citations_data = []
@@ -987,13 +1034,11 @@ def sop_organize(pid, q, request: gr.Request = None):
 
 # ── OVL 分析（MESR 浏览 + 10 参数拆分，代码来自 ovl-analyzer）──
 def ovl_files(files, request: gr.Request = None):
-    from src import ovl_view
-    paths = [f if isinstance(f, str) else getattr(f, "name", "") for f in (files or [])]
-    if not paths:
-        return pd.DataFrame(), gr.update(choices=[], value=None), "上传 MESR 文件（可以多选，`.MESR;5` 这类 VMS 文件名也行）。"
-    _track(request, "OVL 分析")
-    df, choices = ovl_view.file_table(paths)
-    return df, gr.update(choices=choices, value=choices[0][1] if choices else None), f"共 {len(paths)} 个文件，下拉选一个查看。"
+    return _bind_mesr(files, request, "OVL 分析")
+
+
+def chat_mesr_files(files, request: gr.Request = None):
+    return _bind_mesr(files, request, "对话附上 MESR", clear_page_when_empty=False)
 
 
 def ovl_show(path, scale):
@@ -1112,6 +1157,7 @@ _SIDE_RECENT = ('<div id="nk-side" style="padding:6px 12px 0;"><div class="nk-re
 _TOOLS = ('<div class="nk-tools">'
           '<span class="nk-pill">知识库检索 <code>nikon_query</code></span>'
           '<span class="nk-pill">错误码 <code>search_error_code</code></span>'
+          '<span class="nk-pill">OVL <code>ovl_analyze</code></span>'
           '<span class="nk-pill">WPS 实时 <code>ask_wps</code></span>'
           '<span class="nk-pill">工作日志 <code>query_worklog</code></span></div>')
 
@@ -1243,7 +1289,12 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
         chatbot = gr.Chatbot(
             height=460, show_label=False, elem_classes="chatbot",
             value=[{"role": "assistant",
-                    "content": "机台知识库已就绪。问我错误码、对准、传送方式或工作日志。"}])
+                    "content": "机台知识库已就绪。问我错误码、对准、步骤或工作日志。要看叠对，先在下面附上 MESR（不入库）。"}])
+        chat_mesr = gr.File(label="附上 MESR（可选，不入库）", file_count="multiple", type="filepath",
+                            elem_id="nk-chat-mesr")
+        chat_mesr_note = gr.Markdown(
+            "要看叠对：在这里附上 MESR，或先用左侧「OVL 分析」上传，然后直接问。文件只在这次使用，不入库。",
+            elem_id="nk-chat-mesr-note")
         with gr.Row(elem_id="nk-inputrow"):
             question = gr.Textbox(placeholder="给 Nikon Expert 发消息…", show_label=False,
                                   lines=1, max_lines=6, scale=12, container=False)
@@ -1350,7 +1401,8 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
     with gr.Column(visible=False) as view_ovl:
         gr.HTML('<div class="nk-view" style="margin-bottom:0;"><h2>OVL 分析</h2>'
                 '<div class="nk-view-sub">上传 MESR 测量文件：晶圆矢量图 / 曲线、数据表、文件头；叠对类数据做 10 参数拆分'
-                '（晶圆级 Tx Ty Sx Sy Rw Ow ＋ Shot 内 tx ty sx sy rs os）· 文件只在这次使用，不入库</div></div>')
+                '（晶圆级 Tx Ty Sx Sy Rw Ow ＋ Shot 内 tx ty sx sy rs os）· 文件只在这次使用，不入库。'
+                '对话里附上的同一份文件，智能体也可以分析</div></div>')
         ovl_up = gr.File(label="MESR 文件（可多选）", file_count="multiple", type="filepath")
         ovl_msg = gr.Markdown("上传 MESR 文件（可以多选，`.MESR;5` 这类 VMS 文件名也行）。")
         ovl_list = gr.Dataframe(interactive=False, wrap=True, max_height=260)
@@ -1480,7 +1532,7 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
     nav_sop.click(lambda: _switch_view("sop"), None, _nav_out)
     nav_ovl.click(lambda: _switch_view("ovl"), None, _nav_out)
     _ovl_out = [ovl_info, ovl_img, ovl_table, ovl_header, ovl_raw, ovl_wafer, ovl_params, ovl_stats, ovl_res_img]
-    ovl_up.change(ovl_files, [ovl_up], [ovl_list, ovl_pick, ovl_msg])
+    ovl_up.change(ovl_files, [ovl_up], [ovl_list, ovl_pick, ovl_msg, chat_mesr_note])
     ovl_pick.change(ovl_show, [ovl_pick, ovl_scale], _ovl_out, concurrency_limit=4, concurrency_id="ovl")
     ovl_scale.release(ovl_image, [ovl_pick, ovl_scale], [ovl_img], concurrency_limit=4, concurrency_id="ovl")
     ovl_scale.release(ovl_fit, [ovl_pick, ovl_wafer, ovl_scale], [ovl_params, ovl_stats, ovl_res_img])
@@ -1525,10 +1577,12 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
     # 多人同时提问：Gradio 默认每个事件同一时间只处理一个（后来的人排队等前一个答完）。
     # 回答时最慢的是云端模型 / 向量化，服务器主要在等，放到同时 CHAT_CONCURRENCY 个（默认 3），两个入口共用名额
     _chat_conc = dict(concurrency_limit=int(os.getenv("CHAT_CONCURRENCY", "3")), concurrency_id="chat")
-    send_btn.click(chat, [question, chatbot], [chatbot, question, citation_buttons],
+    send_btn.click(chat, [question, chatbot, chat_mesr], [chatbot, question, citation_buttons],
                     show_progress="hidden", **_chat_conc)   # Gradio 默认加载遮罩会把对话框整个盖住，流式内容和状态行都看不见
-    question.submit(chat, [question, chatbot], [chatbot, question, citation_buttons],
+    question.submit(chat, [question, chatbot, chat_mesr], [chatbot, question, citation_buttons],
                     show_progress="hidden", **_chat_conc)   # Gradio 默认加载遮罩会把对话框整个盖住，流式内容和状态行都看不见
+    _mesr_out = [ovl_list, ovl_pick, ovl_msg, chat_mesr_note]
+    chat_mesr.change(chat_mesr_files, [chat_mesr], _mesr_out)
     provider_dropdown.change(do_switch_provider, [provider_dropdown], [model_dropdown, switch_status])
     switch_btn.click(do_apply_model, [provider_dropdown, model_dropdown], [switch_status])
 
@@ -1594,6 +1648,15 @@ def _register_routes(fastapi_app):
         if resolved.suffix.lower() != ".pdf":
             return PlainTextResponse("Only PDF files allowed", status_code=400)
         return FileResponse(str(resolved), media_type="application/pdf")
+
+    @fastapi_app.get("/serve-ovl")
+    async def serve_ovl(f: str = ""):
+        """只提供本次分析存下的矢量图 / 曲线 / 残差图，不接受任意路径。"""
+        from src.ovl_view import artifact_file
+        path = artifact_file(f)
+        if path is None:
+            return PlainTextResponse("Not found", status_code=404)
+        return FileResponse(str(path), media_type="image/png")
 
     @fastapi_app.get("/serve-md")
     async def serve_md(path: str):

@@ -18,6 +18,15 @@ class SourceCollector:
     def __init__(self):
         self._items = []          # 原始命中 dict
         self._seen = set()        # (doc_id, section/page) 去重
+        self._notes = []          # 附在最终回答后面的块（OVL 图等，不进引用列表）
+
+    def add_note(self, markdown: str):
+        text = (markdown or "").strip()
+        if text and text not in self._notes:
+            self._notes.append(text)
+
+    def notes(self) -> list:
+        return list(self._notes)
 
     def add(self, results: list, tool: str):
         for r in results:
@@ -271,6 +280,29 @@ def build_tools(collector: SourceCollector, retriever=None, question: str = "", 
             return "\n\n".join(sop_index.format_text(p, md=False, detail_chars=300, max_chars=3500) for p in hits)
         return _memo("procedure_lookup", query, run)
 
+    from src import ovl_view
+    _ovl_key = ovl_view.session_key()
+    _ovl_names = ovl_view.pending_names(_ovl_key)
+
+    def ovl_analyze(which: str = "") -> str:
+        """分析用户这次上传的 MESR（overlay / 叠对 / OVL），和网页「OVL 分析」同一套解析、画图、10 参数。
+        给出文件类型、测量日期、机台、传感器、数据规模；叠对类再给晶圆级 Tx/Ty/Sx/Sy/Rw/Ow 和 Shot 内 tx/ty/sx/sy/rs/os，以及残差统计。
+        矢量图 / 曲线 / 残差图会附在最终回答后面。原始 MESR 不入库、不进向量库。
+        问「怎么做 overlay 校正 / 步骤」且没有测量文件时，不要用本工具，用 procedure_lookup。
+        不要根据结果判断超标，也不要主动推荐 SOP。
+        参数 which: 留空用最近一份、第一片晶圆。多份时写文件名。指定晶圆写「wafer 2」或「文件名 wafer 2」。"""
+        def run():
+            out = ovl_view.analyze_remembered(which, key=_ovl_key)
+            if out.get("note"):
+                collector.add_note("**OVL 测量结果**（与「OVL 分析」页同一套计算，文件未入库）\n\n" + out["note"])
+            return out.get("text") or "OVL 分析没有返回内容。"
+        return _memo("ovl_analyze", which or "latest", run, timeout=90)
+
+    ovl_analyze.__doc__ = (ovl_analyze.__doc__ or "") + "\n" + (
+        "当前已记住的 MESR：" + "、".join(_ovl_names) if _ovl_names
+        else "当前没有记住的 MESR。若调用，会提示用户先在对话里附上，或到「OVL 分析」页上传。"
+    )
+
     def fault_history_lookup(query: str) -> str:
         """在厂内故障履历中查历史相似案例（曾经怎么处理、换了什么、结果如何）。
         定位根因或想找处置先例时使用。
@@ -328,8 +360,8 @@ def build_tools(collector: SourceCollector, retriever=None, question: str = "", 
                 acl.reset_current_user(tok)
         return wrapped
 
-    fns = [troubleshooting_lookup, error_code_lookup, procedure_lookup, keyword_search, semantic_search, fault_history_lookup,
-           inspect_diagram, trace_connection, netlist_trace]
+    fns = [troubleshooting_lookup, error_code_lookup, procedure_lookup, ovl_analyze, keyword_search, semantic_search,
+           fault_history_lookup, inspect_diagram, trace_connection, netlist_trace]
     if not _vision_available():
         fns.remove(inspect_diagram)   # 看图模型连不上时不给智能体，免得每次白白失败一步
     return [FunctionTool.from_defaults(fn=_with_user(f)) for f in fns]

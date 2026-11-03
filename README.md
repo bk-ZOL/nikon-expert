@@ -16,11 +16,11 @@
 | **对话** | 直接问。简单的问题走快速检索；问故障、问「怎么做 / 步骤 / SOP」的会走**多步排查智能体**，自己决定查哪些资料、查几轮，回答每一步都标出处 |
 | **SOP 速查** | 输入要做的作业（「AIS 电压调整」「wafer loader 机械手清洁」），列出手册、检查表、自编 SOP 里的完整操作流程（按原文顺序），可以一键整理成中文 SOP |
 | **错误码速查** | 精确查报警码；现场写法 `STG-29-80` 会自动换算成手册里的主码 / 细分码 |
-| **OVL 分析** | 上传 MESR 测量文件：晶圆矢量图 / 曲线、数据表、文件头；叠对类数据做 10 参数拆分（晶圆级 Tx Ty Sx Sy Rw Ow + Shot 内 tx ty sx sy rs os）和残差图。文件只在这次使用，不入库 |
+| **OVL 分析** | 上传 MESR 测量文件：晶圆矢量图 / 曲线、数据表、文件头；叠对类数据做 10 参数拆分（晶圆级 Tx Ty Sx Sy Rw Ow + Shot 内 tx ty sx sy rs os）和残差图。文件只在这次使用，不入库。对话里也可以附上同一份文件，智能体用 `ovl_analyze` 做同一套分析 |
 | **Troubleshooting 表** | 按机型 → Unit 归类的故障经验：原厂对策、现场验证有效的措施、发生次数、走过的弯路。提炼出来的条目先「待确认」，管理员确认后才给其他人看、才被智能体引用 |
 | **工作日志** | 实时读飞书上各现场的装机调试履历 |
 | **知识库** | 上传、删除资料，看入库进度 |
-| **Claude（MCP）** | 13 个工具，在 Claude 里也能查库、看电路图、追线（见第六节） |
+| **Claude（MCP）** | 14 个工具，在 Claude 里也能查库、看电路图、追线、分析 MESR（见第六节） |
 
 数据规模（2026-10-17）：资料 700 份（手册 443、检查表 119、自编 SOP 93、电路图 16 本、错误码原文 18、故障履历、工作日志），向量 22.9 万条，SOP 目录 3709 个流程，缩写对照 219 个，Troubleshooting 表 2375 条，S207D 线表 8324 条连接。
 
@@ -68,8 +68,8 @@ WPS 知识库 ──每 30 分钟──┐                                     �
 提问 ─→ 路由：问步骤 / 故障 / 复合问题？
          ├─ 否 → 快速检索：全文 + 语义双路召回 → 机型加权 → 精排 → 生成回答
          └─ 是 → 多步排查智能体（ReAct）：想一步、查一步，直到信息够了再回答
-                  工具：Troubleshooting 表 / 错误码 / 操作步骤目录 / 关键词 / 语义 /
-                        故障履历 / 看电路图 / 线表追线 / 按线号交叉引用
+                  工具：Troubleshooting 表 / 错误码 / 操作步骤目录 / OVL 测量（MESR，不入库） /
+                        关键词 / 语义 / 故障履历 / 看电路图 / 线表追线 / 按线号交叉引用
 ```
 
 - **缩写先展开**：问题里的缩写按对照表补上全称一起查（RR → Reticle Rotation / レチクルローテーション / 掩模旋转）。对照表从资料里自动挖（「全称 (缩写)」写法和现成的对照表），人工补充写在 `config/glossary.tsv`，改了下次提问就生效
@@ -99,6 +99,7 @@ WPS 知识库 ──每 30 分钟──┐                                     �
 |---|---|
 | `nikon_query` / `nikon_search` / `nikon_search_error_code` | 问答 / 关键词搜索 / 精确查报警码 |
 | `nikon_search_sop` | 查完整操作流程（可选整理成中文） |
+| `nikon_analyze_ovl` | 分析服务器上的一份 MESR（和网页同一套 10 参数，不入库） |
 | `nikon_view_diagram` / `nikon_reindex_diagrams` | 电路图按线号、板号、页号取页，高清渲染 |
 | `nikon_trace` | S207D 线表追线（接插件 → 线缆 → 对端，可追几跳） |
 | `nikon_query_worklog` | 实时读飞书履历（可按现场筛） |
@@ -136,7 +137,7 @@ WPS 知识库 ──每 30 分钟──┐                                     �
 
 Mac 端：Ollama 0.40.4（`~/Applications/ollama-0.40.4`，LaunchAgent `com.jayce.ollama-tailnet`，只监听 Tailscale 地址），模型 gemma4。
 
-**OVL 分析**用的是另一个仓库 [ovl-analyzer](https://github.com/bk-ZOL/ovl-analyzer) 的代码，服务器上放在 `/opt/ovl-analyzer`（也可以用 `OVL_ANALYZER_PATH` 指定）。改了 ovl-analyzer 要同步过去：`rsync -a --delete --exclude __pycache__ ~/ovl-analyzer/ovl_analyzer/ root@服务器:/opt/ovl-analyzer/ovl_analyzer/`。
+**OVL 分析**用的是另一个仓库 [ovl-analyzer](https://github.com/bk-ZOL/ovl-analyzer) 的代码，服务器上放在 `/opt/ovl-analyzer`（也可以用 `OVL_ANALYZER_PATH` 指定）。改了 ovl-analyzer 要同步过去：`rsync -a --delete --exclude __pycache__ ~/ovl-analyzer/ovl_analyzer/ root@服务器:/opt/ovl-analyzer/ovl_analyzer/`。对话里怎么把 MESR 交给智能体：在输入框上方附上文件，或先在「OVL 分析」页上传（两处记在同一次登录里，默认分析最近一份）。原始文件不进向量库。MCP 要分析服务器上已有的文件时用 `nikon_analyze_ovl`，传路径。不标超标，也不按结果推荐 SOP。
 
 **改代码的规矩**：先在开发分支 `feat/feishu-worklog` 改、提交、推送，再传到服务器，改完开 PR 合并进 `main`；不直接在服务器上改。重启服务尽量放在夜里（2:00～5:00）。
 
@@ -167,7 +168,7 @@ src/
   ingestor.py / ingest_docx.py / ingest_worklog.py   入库
   machine_model.py   机型判断；acl*.py 权限
   net_trace.py / netlist_trace.py / vector_glyph.py   电路图追线、矢量字形识读
-  ovl_view.py        OVL 分析页（解析、画图、10 参数都调用 ovl-analyzer 的代码）
+  ovl_view.py        OVL 分析页和智能体工具（解析、画图、10 参数都调用 ovl-analyzer 的代码）
 ui/app.py            网页
 mcp_server.py / mcp_tools_extra.py / mcp_http_server.py   MCP
 scripts/             同步、入库、建索引、提炼等脚本

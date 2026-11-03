@@ -118,6 +118,14 @@ footer { display: none !important; }
   padding: 0 !important; font-size: 1rem !important; line-height: 1;
 }
 
+/* 对话里附 MESR：和输入栏同宽，不另起一套上传页 */
+#nk-chat-mesr, #nk-chat-mesr-note {
+  max-width: var(--nk-col);
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
+#nk-chat-mesr-note p { color: var(--nk-ink-soft); font-size: .84rem; margin: 2px 0 6px; }
+
 /* ── 工具:输入条下方一排低调 pill,不是仪表盘 ─────────── */
 .nk-tools { max-width: var(--nk-col); margin: 10px auto 2px; display: flex; flex-wrap: wrap; gap: 7px; }
 .nk-pill {

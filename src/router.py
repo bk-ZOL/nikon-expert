@@ -208,7 +208,62 @@ def is_procedure_query(question: str) -> bool:
     return bool(_PROCEDURE_RE.search(question or ""))
 
 
-def should_use_agent(question: str, mode: Optional[str] = None) -> bool:
+# OVL / MESR：强信号一定走智能体（快路径调不到 ovl_analyze）。
+# 单独出现 overlay（如「overlay baseline 校正」）不强制，除非同时在问测量结果，或这次已经附了 MESR。
+_OVL_STRONG = re.compile(
+    r"(?<![A-Za-z0-9])(?:mesr|ovl)(?![A-Za-z0-9])|"
+    r"叠对|套刻|重ね合わせ|オーバーレイ|"
+    r"10\s*参数|十参数|残差图|矢量图",
+    re.I,
+)
+_OVL_SOFT = re.compile(r"(?<![A-Za-z0-9])overlay(?![A-Za-z0-9])", re.I)
+_OVL_ASK = re.compile(r"分析|解读|看一下|看看|怎么样|结果|数据|测量|文件|上传|拆分|拟合", re.I)
+_OVL_FOLLOW = re.compile(
+    r"(?<![A-Za-z0-9])wafer(?![A-Za-z0-9])|晶圆|残差|10\s*参数|十参数|矢量|另一片|第\s*\d+\s*片|详细|继续|再看",
+    re.I,
+)
+
+
+def _msg_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        return _msg_text(content.get("text", ""))
+    if isinstance(content, (list, tuple)):
+        return "\n".join(_msg_text(x) for x in content)
+    return ""
+
+
+def _ovl_text(question: str) -> bool:
+    q = question or ""
+    if _OVL_STRONG.search(q):
+        return True
+    return bool(_OVL_SOFT.search(q) and _OVL_ASK.search(q))
+
+
+def is_ovl_query(question: str, history=None) -> bool:
+    """问叠对测量 / MESR / 10 参数。已附文件时，「wafer 2」这类追问也走智能体。"""
+    if _ovl_text(question):
+        return True
+    follow = bool(_OVL_FOLLOW.search(question or "") or _OVL_SOFT.search(question or ""))
+    pending = False
+    if follow or history:
+        try:
+            from src.ovl_view import has_pending
+            pending = has_pending()
+        except Exception:
+            pending = False
+    if pending and follow:
+        return True
+    prev = ""
+    for m in reversed(history or []):
+        if isinstance(m, dict) and m.get("role") == "user":
+            prev = _msg_text(m.get("content"))
+            break
+    return bool(prev and _ovl_text(prev) and follow)
+
+
+def should_use_agent(question: str, mode: Optional[str] = None, history=None) -> bool:
     """判断走多步 Agent 排障还是单次 RAG 快路径。
 
     默认**语义路由**（LLM 按应用场景判断，避免关键词误判——如机型号 S207 被当错误码）；
@@ -224,6 +279,8 @@ def should_use_agent(question: str, mode: Optional[str] = None) -> bool:
 
     if is_procedure_query(question):
         return True                    # 操作步骤要走 procedure_lookup 拿完整流程，快路径只能拿到零散片段
+    if is_ovl_query(question, history):
+        return True                    # 叠对测量要走 ovl_analyze，快路径读不到刚上传的 MESR
     if os.getenv("AGENT_ROUTER", "semantic").lower() != "keyword":
         sem = _semantic_use_agent(question)
         if sem is not None:

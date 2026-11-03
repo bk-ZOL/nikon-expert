@@ -26,7 +26,7 @@
 | 知识库 | 上传、删除、看入库进度 |
 | 审计 | 管理员：账号、资料权限、使用记录 |
 
-另外 Claude 可以通过 MCP 的 13 个工具查库、看电路图、追线（README 第六节）。
+另外 Claude 可以通过 MCP 的 14 个工具查库、看电路图、追线、分析 MESR（README 第六节）。
 
 问答模型是 **deepseek-flash**（DeepSeek-V4.1-Flash，`src/providers.py`）。旧名 `deepseek-v4-flash` 已下线，PR #10（2026-10-17）改成现在的名字。默认关掉后台思考（`DEEPSEEK_THINKING`）。大批量提炼不走 deepseek，走用户 Mac 上的 gemma4。
 
@@ -50,7 +50,9 @@
 
 `src/agent.py` 是 ReAct 智能体：自己决定查什么、查几轮（`AGENT_MAX_ITERATIONS`，默认 6 步），思考过程在对话里逐段显示（`ReActStreamParser`）。路由在 `src/router.py` 的 `should_use_agent`：问步骤一定走智能体；其余默认用语义判断，语义不可用时退回关键词。
 
-工具（`src/tools.py`）：Troubleshooting 表、错误码、故障履历、操作步骤、关键词、语义、看电路图、线表追线（`netlist_trace`）、按线号交叉引用（`trace_connection`）。
+工具（`src/tools.py`）：Troubleshooting 表、错误码、故障履历、操作步骤、OVL 测量（`ovl_analyze`，MESR 不入库）、关键词、语义、看电路图、线表追线（`netlist_trace`）、按线号交叉引用（`trace_connection`）。
+
+问步骤一定走智能体；问 MESR / 叠对 / 10 参数也走智能体（`router.is_ovl_query`）。单独说「overlay baseline 校正」、手里又没有测量文件时，仍走原来的检索。
 
 文件头还写着「P1 骨架」，那是旧注释。这个智能体已经接在网页对话和 MCP 上。
 
@@ -79,7 +81,7 @@
 | 夜间提炼 | `src/kb_extract.py`、`src/local_llm.py`，定时器 `nikon-kb-extract.timer`（北京 00:00～06:30，每半小时试一次）。Mac 在线且空闲超过 10 分钟才跑 gemma4；Mac 不在就停，不退回 deepseek。结果先进 Troubleshooting 表，状态是待确认 |
 | 原来的 deepseek 抽取 | `nikon-ts-extract.timer` 已停用。见 README 第八节 |
 
-OVL 的解析和画图在另一个仓库 [ovl-analyzer](https://github.com/bk-ZOL/ovl-analyzer)。本仓库只有 `src/ovl_view.py` 去调用它。
+OVL 的解析和画图在另一个仓库 [ovl-analyzer](https://github.com/bk-ZOL/ovl-analyzer)。本仓库的 `src/ovl_view.py` 去调用它。对话里附上 MESR，或先在「OVL 分析」页上传，智能体用 `ovl_analyze` 做同一套 10 参数；图附在回答后面（`/serve-ovl`）。文件不入库。不标超标，也不按结果推荐 SOP。MCP 对服务器上已有的文件用 `nikon_analyze_ovl`。
 
 ### 多人同时提问
 
@@ -109,13 +111,13 @@ OVL 的解析和画图在另一个仓库 [ovl-analyzer](https://github.com/bk-ZO
 下面只是以后可以考虑的方向，**不是承诺，也不是当前迭代**。没写进这里的，默认不做。
 
 1. **对话旁边并排看原文。** 旧 V2.1 草图是左边对话、右边嵌 PDF。现在是新标签打开。Word、Excel 的引用还点不开文件。页内预览如果要做，得单独定，不要把它和「引用已经能打开」混成一件未完成的 P0。
-2. **OVL 接进智能体。** 现在只做网页上传：不标超标，不按超标项推荐 SOP 或现场经验（CLAUDE.md 8.9，用户当时定的范围）。
-3. **Troubleshooting 待确认更好审。** 管理员现在可以按「待确认」筛选，在折叠表单里改一条再保存（`ui/app.py` 的编辑 / 确认）。没有单独的待审队列，也不能一批确认。网页上「立即抽取新资料」仍去启动已停用的 `nikon-ts-extract.service`；夜里实际跑的是 `nikon-kb-extract`。按钮和定时任务不是一条路。
-4. **SOP 速查按模块筛**（WS / RS / WL / AIS / LC）。夜间提炼会给流程分模块，速查页只有机型和关键词。系统介绍稿的「下一步」里写过，页面上没有。
-5. **补缩写。** `scripts/build_glossary.py --missing` 能列出常用但没收录的（介绍稿点过 TPR、RB、INC）。这是往 `config/glossary.tsv` 里补行，不是新功能。
-6. **只有截图的资料。** `拆机SOP（S207）` 这类几乎没有文字层，检索和 SOP 拆分都拿不到步骤（CLAUDE.md 待办 7）。要对截图做 OCR 才搜得到。
-7. **同步和向量化偏慢。** WPS 每 30 分钟把两千多个文件走一遍；向量化是一条一条请求（CLAUDE.md 待办 11）。
-8. **`7400-2.pdf` 文件是坏的**，需要在 WPS 里另存一份再入库。这是资料问题，不是代码任务。
+2. **Troubleshooting 待确认更好审。** 管理员现在可以按「待确认」筛选，在折叠表单里改一条再保存（`ui/app.py` 的编辑 / 确认）。没有单独的待审队列，也不能一批确认。网页上「立即抽取新资料」仍去启动已停用的 `nikon-ts-extract.service`；夜里实际跑的是 `nikon-kb-extract`。按钮和定时任务不是一条路。
+3. **SOP 速查按模块筛**（WS / RS / WL / AIS / LC）。夜间提炼会给流程分模块，速查页只有机型和关键词。系统介绍稿的「下一步」里写过，页面上没有。
+4. **补缩写。** `scripts/build_glossary.py --missing` 能列出常用但没收录的（介绍稿点过 TPR、RB、INC）。这是往 `config/glossary.tsv` 里补行，不是新功能。
+5. **只有截图的资料。** `拆机SOP（S207）` 这类几乎没有文字层，检索和 SOP 拆分都拿不到步骤（CLAUDE.md 待办 7）。要对截图做 OCR 才搜得到。
+6. **同步和向量化偏慢。** WPS 每 30 分钟把两千多个文件走一遍；向量化是一条一条请求（CLAUDE.md 待办 11）。
+7. **`7400-2.pdf` 文件是坏的**，需要在 WPS 里另存一份再入库。这是资料问题，不是代码任务。
+8. **按超标项推荐 SOP。** OVL 已经能从对话里分析 MESR，仍然不标超标、不按结果推荐 SOP 或现场经验（CLAUDE.md 8.9，用户当时定的范围）。
 
 ---
 
