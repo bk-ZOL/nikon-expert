@@ -682,6 +682,7 @@ _TOOL_LABELS = {
     "inspect_diagram": "看电路图",
     "trace_connection": "在电路图里追线",
     "netlist_trace": "按线表追线",
+    "ovl_analyze": "分析 MESR / 叠对",
 }
 
 
@@ -775,6 +776,10 @@ def _agent_query_stream(question: str, history: list = None):
             return
 
     if final:
+        notes = "\n\n".join(n for n in (final.get("notes") or []) if n)
+        if notes:
+            # 测量摘要和图由工具附上，不依赖模型是否把数字抄进结论
+            yield "\n\n" + notes, False, [], [], True
         yield "", True, final["citations"], final["citations_data"], final["has_result"]
     else:
         yield "\n\n⚠️ 排查中途结束，没有得出结论，请稍后重发。", True, [], [], False
@@ -798,7 +803,7 @@ def query_stream(question: str, mode: str = "qa", history: list = None, user=Non
     _tok = acl.set_current_user(user)
     try:
         # ── 智能路由：故障排查 / 复合问题 → 多步 Agent
-        if should_use_agent(question, mode):
+        if should_use_agent(question, mode, history):
             yield from _agent_query_stream(question, history)
             return
 

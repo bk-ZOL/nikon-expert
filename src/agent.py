@@ -29,6 +29,7 @@ SYSTEM_PROMPT = """你是「Nikon Expert」—— 晶圆厂 Nikon 光刻机设�
    - 出现明确报警码 → 再用 error_code_lookup 查含义（现场写法如 STG-29-80 也直接传给它，会自动换算成手册里的主码/细分码）；
    - 想找历史处置先例 / 定位根因 → 用 fault_history_lookup；
    - 问「怎么做 / 步骤 / 流程 / SOP」（拆装、调整、清洁、软件操作、确认作业）→ **先用 procedure_lookup** 取完整的原文步骤，按原文顺序整理成中文步骤，不增删步骤，按钮名/参数名/数值保留原文；
+   - 问叠对 / overlay / OVL / MESR 的测量结果、10 参数、残差、矢量图 → **用 ovl_analyze**。文件是对话里附上的 MESR，或「OVL 分析」页刚上传的那份；which 留空用最近一份，指定晶圆写「wafer 2」。问的是校正或测量的操作步骤、手里没有测量文件时，用 procedure_lookup，不要编造 10 参数。不要判断超不超标，用户没问就不要推荐 SOP；
    - 查具体部件、参数 → 用 keyword_search；
    - 概念/原理/「为什么」类 → 用 semantic_search；
    - 涉及接线/电路/信号/机械装配、需要看图纸时 → 用 inspect_diagram（定位相关页 + 文字层内容 + 原图链接）；
@@ -36,7 +37,7 @@ SYSTEM_PROMPT = """你是「Nikon Expert」—— 晶圆厂 Nikon 光刻机设�
    - 要确认"某元件/传感器连到哪、用哪根线/pin、到哪个面板板卡"，netlist_trace 查不到或没有编号时 → 用 trace_connection（按线号交叉引用还原连接）。
 3. 允许多轮调用：拿到一个工具结果后，若信息仍不足以支撑排查结论，继续调用其他工具。
    但务必高效：不要用相同参数重复调用同一个工具；一旦已取到足够信息，立即停止取证、直接给出最终结论，不要为凑步数而反复搜索。
-4. 所有技术结论必须来自工具返回的资料，禁止捏造 Error Code、参数数值、操作步骤或章节号。
+4. 所有技术结论必须来自工具返回的资料，禁止捏造 Error Code、参数数值、操作步骤或章节号。ovl_analyze 返回的测量数字算已取证，不要再说知识库里没有。
 5. 若多轮取证后知识库仍无充分记录，如实说明「知识库中未找到充分记录，建议联系 Nikon FAE」，不要用通用常识硬填。
 
 最终回答用中文，按以下结构输出（每个技术结论末尾标注来源，如 [来源：故障履历 2025-03] 或 [来源：手册第X页]）：
@@ -59,6 +60,11 @@ Step 2：... [来源：...]
 **【准备 / 前提条件】**（工具、备件、要先完成的作业；原文没写就不写）
 **【操作步骤】**（按原文顺序和分段，Step 1、Step 2…，每步末尾标来源）
 **【注意事项】**（原文的 NOTE / CAUTION / WARNING，机型差异）
+
+如果问的是 **MESR / 叠对测量**（不是故障，也不是操作步骤），不用上面的结构，改用几句中文：
+**【测量文件】** 文件名、类型、日期、机台（数字全部来自 ovl_analyze）
+**【读数】** 10 参数里值得看的几项，以及残差还剩多少；不是叠对类就说明文件类型、不做拆分
+完整参数表和图会由系统附在回答后面。不要重抄整张表，不要再贴图片链接，不要编造小数。
 
 【思考（Thought）的写法】
 每一步的 Thought 会实时显示给现场工程师看，**一律用中文**，一两句话说清楚“刚才查到了什么、接下来查什么、为什么”，不要写英文。
@@ -240,7 +246,19 @@ async def _agent_events(question: str, history=None):
 
     # 问题里的缩写附上对照（RR = Reticle Rotation …），让它检索时用全称、几种意思按上下文选
     from src import glossary
+    from src.router import is_ovl_query
+    from src import ovl_view
     hint = glossary.hint(question)
+    if is_ovl_query(question, history):
+        names = ovl_view.pending_names()
+        if names:
+            hint = (hint + "\n" if hint else "") + (
+                "已附上 MESR，不入库：" + "、".join(names) + "。用 ovl_analyze 分析；which 留空用最近一份。"
+            )
+        else:
+            hint = (hint + "\n" if hint else "") + (
+                "当前没有附上 MESR。需要测量数据时调用 ovl_analyze，它会说明怎么上传；不要编造 10 参数。"
+            )
     handler = agent.run(f"{question}\n\n{hint}" if hint else question, chat_history=_to_chat_history(history))
 
     async for ev in handler.stream_events():
@@ -264,7 +282,8 @@ async def _agent_events(question: str, history=None):
            "text": _strip_dsml(str(resp)),
            "citations": collector.citations(),
            "citations_data": collector.citations_data(),
-           "has_result": collector.has_any()}
+           "has_result": collector.has_any(),
+           "notes": collector.notes()}
 
 
 def run_agent_sync(question: str, history=None):

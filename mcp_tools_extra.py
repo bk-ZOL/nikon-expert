@@ -311,3 +311,21 @@ def nikon_search_sop(query: str, machine_model: str = "", limit: int = 3, organi
         out.append(sop_index.format_text(p, detail_chars=500, max_chars=6000))
         out.append("")
     return "\n".join(out)
+
+
+@mcp.tool()
+def nikon_analyze_ovl(file_path: str, wafer: str = "") -> str:
+    """Analyze one MESR overlay file with the same parser, plots and 10-parameter fit as the web OVL page.
+
+    The file is NOT ingested into the knowledge base and is NOT embedded. Do not flag out-of-spec
+    limits and do not recommend an SOP unless the user asked. For the web chat, users attach the
+    MESR in the conversation (or on the OVL page) and the agent tool ovl_analyze reads that copy.
+    Use this tool when the file is already on the server.
+
+    Args:
+        file_path: server path to a MESR file (VMS names like ``name.MESR;5`` are fine).
+        wafer: wafer id, empty means the first wafer. Example: "2".
+    """
+    from src.ovl_view import analyze_path
+    picked = int(wafer) if str(wafer).strip().isdigit() else None
+    return analyze_path(file_path, picked)

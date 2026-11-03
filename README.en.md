@@ -12,12 +12,13 @@ Updated 2026-10-17. The Chinese README is the primary version; design history is
 
 | Entry | Purpose |
 |---|---|
-| **Chat** | Ask anything. Simple questions use fast retrieval; troubleshooting and "how do I…" questions go to a **multi-step ReAct agent** that decides which sources to query, cites every step |
+| **Chat** | Ask anything. Simple questions use fast retrieval; troubleshooting, procedures, and overlay/MESR questions go to a **multi-step ReAct agent**. Attach a MESR in chat, or reuse the file uploaded on the OVL page; `ovl_analyze` runs the same 10-parameter fit. The file is not indexed |
 | **SOP lookup** | Complete procedures from manuals, check sheets and in-house SOPs, in original order; one click rewrites one as a Chinese SOP |
 | **Error codes** | Exact lookup; field notation like `STG-29-80` is converted to the manual's main / detail code |
 | **Troubleshooting table** | Experience by model → unit: OEM countermeasures, fixes verified in the field, occurrence counts, dead ends. Distilled entries stay *pending* until an admin confirms them |
 | **Work logs** | Live view of each site's commissioning log on Feishu |
-| **Claude (MCP)** | 13 tools for querying the knowledge base, viewing circuit diagrams and tracing wires |
+| **OVL analysis** | Upload a MESR: wafer vector map or curves, data table, header; overlay files get a 10-parameter split and a residual map. Same upload can be discussed in chat. Not ingested |
+| **Claude (MCP)** | 14 tools, including `nikon_analyze_ovl` for a MESR that is already on the server |
 
 Scale (2026-10-17): 700 documents, 229k vectors, 3,709 procedures, 219 abbreviations, 2,375 troubleshooting entries, 8,324 wiring connections (S207D).
 

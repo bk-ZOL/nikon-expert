@@ -174,7 +174,8 @@
 
 ## 8.9 2026-10-17 OVL 分析页（集成 ovl-analyzer）
 
-- 网页新增「OVL 分析」：上传 MESR → 晶圆矢量图 / 曲线、数据表、文件头、原文；叠对类（`is_vector_type`）做 10 参数拆分 + 原始 vs 残差图。用户定的范围：先只做网页上传，**不标超标、不接智能体建议**（以后可能做：智能体按超标项对应 SOP / 现场经验）。
+- 网页新增「OVL 分析」：上传 MESR → 晶圆矢量图 / 曲线、数据表、文件头、原文；叠对类（`is_vector_type`）做 10 参数拆分 + 原始 vs 残差图。用户定的范围：**不标超标、不按结果推荐 SOP**。
+- **2026-11-03 接进智能体**（仍不标超标、不推荐 SOP）：对话输入框上方可以附 MESR，或沿用「OVL 分析」页刚上传的文件（同一次登录、同一份列表，默认最近一份）。工具 `ovl_analyze`（`src/tools.py`）走 `ovl_view.analyze_remembered`，摘要和 `/serve-ovl` 图附在回答后面。原始 MESR 不入库。MCP 对服务器上已有的文件用 `nikon_analyze_ovl`（传路径）。问「overlay baseline 怎么做」这种步骤、手里没有测量文件时，仍走 `procedure_lookup`。
 - **代码只有一份**：解析、画图、拟合都在 `~/ovl-analyzer`（另一个仓库）。为此把画图函数从桌面版界面里拆到了 `ovl_analyzer/plots.py`（不依赖 Qt），桌面版改成调用它；拆前拆后 12 张图逐像素一致。nikon-expert 的 `src/ovl_view.py` 只负责调用这些函数。
 - 服务器上 ovl-analyzer 放在 `/opt/ovl-analyzer`（rsync 同步，见 README 第八节）；虚拟环境新装了 matplotlib 3.10.8（只新增了包，没有升级 numpy 等已有的库）。服务器上 pip 的启动脚本指向旧路径，要用 `.venv/bin/python -m pip`。
 
