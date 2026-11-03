@@ -489,8 +489,9 @@ def _is_admin_user(request) -> bool:
 
 
 def _reveal_admin(request: gr.Request = None):
-    """页面加载时：仅管理员显示「审计」导航按钮。"""
-    return gr.update(visible=_is_admin_user(request))
+    """页面加载时：仅管理员显示「审计」导航，以及 Troubleshooting 的待确认队列。"""
+    show = gr.update(visible=_is_admin_user(request))
+    return show, show
 
 
 # ── 权限管理（审计页的各个标签，仅管理员）──────────────────────────────
@@ -614,6 +615,14 @@ def adm_preview(uid, request: gr.Request = None):
 
 
 # ── Troubleshooting 表 ──────────────────────────────────────────────
+_TS_Q_COLS = ["编号", "来源", "机型", "Unit", "故障代码", "报警/问题描述", "发生次数", "最近"]
+
+
+def _ts_choice(e):
+    title = (e.get("title") or "").replace("\n", " ")
+    return (f"#{e['id']} {e.get('machine') or ''}｜{e.get('unit') or ''}｜{e.get('error_code') or ''} {title[:40]}", e["id"])
+
+
 def _ts_user(request):
     from src import acl
     try:
@@ -652,7 +661,7 @@ def ts_query(machine, unit, status, kw, origin="", request: gr.Request = None):
     if not admin and len(df):
         for col in ("报警/问题描述", "主要根因", "最有效措施"):
             df[col] = df[col].astype(str).map(_mask)
-    picks = [(f"#{e['id']} {e['machine']}｜{e['unit']}｜{e['error_code'] or ''} {e['title'][:30]}", e["id"]) for e in rows]
+    picks = [_ts_choice(e) for e in rows]
     n_oem = sum(1 for e in rows if e.get("origin") == "oem")
     return (f"共 **{len(rows)}** 个条目（现场 {len(rows) - n_oem}、原厂 {n_oem}）。下拉选一个看详情。",
             df, gr.update(choices=picks, value=None))
@@ -737,14 +746,117 @@ def ts_save(eid, title, unit, code, rcs, sols, dets, proc, notes, status, reques
                                follow_up=lines(proc), notes=notes, status=status)
 
 
+def ts_queue(machine, unit, kw, origin, request: gr.Request = None):
+    """待确认队列。不看「状态」筛选项，避免筛成已确认时队列被清空。"""
+    from src import ts_table
+    empty = pd.DataFrame(columns=_TS_Q_COLS)
+    blank_pick = gr.update(choices=[], value=None)
+    blank_multi = gr.update(choices=[], value=[])
+    if not _is_admin_user(request):
+        return "仅管理员可以复核待确认条目。", empty, blank_pick, blank_multi
+    user = _ts_user(request)
+    rows = ts_table.pending_queue(user, admin=True, machine=machine or "", unit=unit or "",
+                                  keyword=kw or "", origin=origin or "")
+    new_n = len(ts_table.search(user, admin=True, machine=machine or "", unit=unit or "",
+                                status="has_new", keyword=kw or "", origin=origin or ""))
+    table = [{
+        "编号": e["id"],
+        "来源": "原厂" if e.get("origin") == "oem" else "现场",
+        "机型": e.get("machine") or "",
+        "Unit": e.get("unit") or "",
+        "故障代码": e.get("error_code") or "—",
+        "报警/问题描述": e.get("title") or "",
+        "发生次数": e.get("occ_count") or 0,
+        "最近": e.get("last_date") or e.get("updated_at") or "—",
+    } for e in rows]
+    df = pd.DataFrame(table, columns=_TS_Q_COLS) if table else empty
+    picks = [_ts_choice(e) for e in rows]
+    hint = ""
+    if new_n:
+        hint = (f" 另有 **{new_n}** 条已确认条目有新案例，用下面的状态筛「有新案例」复核"
+                "（不放进这个队列，免得和待确认混在一起）。")
+    msg = (f"待确认 **{len(rows)}** 条（按更新时间从早到晚）。"
+           "打开一条后在下方改，再确认或驳回；勾选多条时要先勾「我已核对」。"
+           "机型、Unit、来源、关键词用页面上方的筛选，这里的状态固定是待确认。"
+           f"{hint}")
+    return msg, df, gr.update(choices=picks, value=None), gr.update(choices=picks, value=[])
+
+
+def ts_open(eid, request: gr.Request = None):
+    """队列和总表共用一份详情 / 编辑表单。记住当前打开的编号，保存时以它为准。"""
+    cur = int(eid) if eid else None
+    return ts_detail(eid, request) + [cur]
+
+
+def ts_confirm_open(eid, title, unit, code, rcs, sols, dets, proc, notes, request: gr.Request = None):
+    """确认当前打开的这一条，并带上表单里还没保存的修改。"""
+    return ts_save(eid, title, unit, code, rcs, sols, dets, proc, notes, "confirmed", request)
+
+
+def ts_reject_open(eid, request: gr.Request = None):
+    """驳回当前打开的这一条。只改状态，不把表单里没保存的字写进去。"""
+    from src import ts_table
+    if not _is_admin_user(request):
+        return _ADMIN_ONLY
+    if not eid:
+        return "⚠️ 先打开一条。"
+    msg = ts_table.save_entry(_admin_uid(request), int(eid), status="rejected")
+    if str(msg).startswith("✅"):
+        return f"✅ 已驳回条目 #{int(eid)}。其他账号看不到，智能体也不会引用。"
+    return msg
+
+
+def ts_batch_confirm(machine, unit, status, kw, origin, picked, use_all, acked, request: gr.Request = None):
+    """核对后确认勾选的待确认，或确认当前筛选下的全部待确认。已确认 / 已驳回的行不会被改掉。"""
+    from src import ts_table
+    hold = [gr.update() for _ in range(9)]
+    if not _is_admin_user(request):
+        return [_ADMIN_ONLY, *hold]
+    try:
+        rows = ts_table.pending_queue(_ts_user(request), admin=True, machine=machine or "", unit=unit or "",
+                                      keyword=kw or "", origin=origin or "")
+        err, ids = ts_table.review_batch_ids(acked, use_all, picked, [e["id"] for e in rows])
+        if err:
+            return [err, *hold]
+        res = ts_table.confirm_entries(_admin_uid(request), ids)
+    except Exception as ex:
+        return [f"⚠️ 确认失败：{ex}", *hold]
+    n, skip, miss = len(res["confirmed"]), len(res["skipped"]), len(res["missing"])
+    if n:
+        msg = f"✅ 已确认 {n} 条。有权限的账号现在能看到，智能体会引用。"
+    else:
+        msg = "⚠️ 没有确认任何条目。"
+    if skip:
+        msg += f" 跳过 {skip} 条（已经不是待确认，没有改它们）。"
+    if miss:
+        msg += f" {miss} 条找不到。"
+    _track(request, f"批量确认 Troubleshooting {n} 条")
+    q = ts_queue(machine, unit, kw, origin, request)
+    main = ts_query(machine, unit, status, kw, origin, request)
+    return [msg, *q, gr.update(value=False), gr.update(value=False), *main]
+
+
 def ts_run_extract(request: gr.Request = None):
     if not _is_admin_user(request):
         return _ADMIN_ONLY
-    import subprocess
-    r = subprocess.run(["systemctl", "start", "--no-block", "nikon-ts-extract.service"], capture_output=True, text=True)
-    _track(request, "启动 Troubleshooting 抽取")
-    return ("✅ 已在后台开始抽取新资料（只处理新增/改过的内容），几分钟到几十分钟，完成后点「查询」刷新。"
-            if r.returncode == 0 else f"⚠️ 启动失败：{(r.stderr or r.stdout).strip()[:200]}")
+    from src import kb_extract
+    try:
+        info = kb_extract.start_manual_extract()
+    except Exception as ex:
+        return f"⚠️ 启动失败：{ex}"
+    _track(request, "启动夜间提炼")
+    if not info.get("ok"):
+        detail = (info.get("detail") or "没有返回原因").strip()
+        return f"⚠️ 没有启动。{detail[:200]}"
+    minutes = info.get("minutes") or 0
+    if info.get("via") == "systemd-run":
+        where = "日志：`journalctl -u nikon-kb-extract-manual -n 50`"
+    else:
+        where = f"日志：`{info.get('log') or '/tmp/nikon-kb-extract-manual.log'}`"
+    return (f"✅ 已在后台开始提炼，最多 {minutes:g} 分钟。"
+            "用的是每晚定时器同一个程序（nikon-kb-extract），Mac 在线并且空闲才会真正跑，"
+            "只处理没做过的内容，资料不发云端。每晚的定时时间没改，也不会再启动已停用的旧抽取服务。"
+            f"{where}。完成后点「查询」刷新。")
 
 
 def do_admin_report(request: gr.Request = None):
@@ -1376,7 +1488,8 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
     # ── 视图：Troubleshooting 表 ──
     with gr.Column(visible=False) as view_ts:
         gr.HTML('<div class="nk-view" style="margin-bottom:0;"><h2>Troubleshooting 表</h2>'
-                '<div class="nk-view-sub">从故障履历 / 工作日志 / 客户报告里积累的「解过的 trouble」· 按机型 → Unit 分类 · 现场验证过的根因和有效措施</div></div>')
+                '<div class="nk-view-sub">按机型 → Unit 分类的故障经验 · 现场验证过的根因和有效措施，以及从手册里提炼的原厂条目'
+                ' · 先「待确认」，管理员确认后才给其他人看、才被智能体引用</div></div>')
         with gr.Row():
             ts_f_machine = gr.Dropdown(label="机型", choices=[("全部", ""), "S207D", "S206D", "S308F", "SF100"], value="")
             ts_f_unit = gr.Dropdown(label="Unit", choices=[("全部", "")] + __import__("src.ts_table", fromlist=["UNITS"]).UNITS, value="")
@@ -1385,6 +1498,27 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
             ts_f_origin = gr.Dropdown(label="来源", choices=[("全部", ""), ("现场", "field"), ("原厂 Guide", "oem")], value="")
             ts_f_kw = gr.Textbox(label="关键词 / 故障代码")
         ts_btn = gr.Button("查询", variant="primary")
+        with gr.Column(visible=False) as ts_queue_box:
+            gr.HTML('<div class="nk-sec first">待确认队列</div>')
+            gr.HTML('<div class="nk-view-sub" style="margin:2px 0 8px;">'
+                    '这里只列还没生效的条目。打开一条后，往下到「编辑 / 确认」里改，再点确认或驳回；'
+                    '勾选多条时要先勾「我已核对」，避免一下子全部生效。'
+                    '确认后有权限的账号能看到，智能体会引用；驳回的继续隐藏。</div>')
+            ts_q_msg = gr.Markdown("")
+            ts_q_df = gr.Dataframe(interactive=False, wrap=True, max_height=320)
+            ts_q_pick = gr.Dropdown(label="打开一条", choices=[])
+            ts_q_multi = gr.Dropdown(label="勾选要确认的条目（可多选）", choices=[], multiselect=True)
+            ts_q_all = gr.Checkbox(label="改为确认当前筛选出的全部待确认（忽略上面的勾选）", value=False)
+            ts_q_ack = gr.Checkbox(label="我已核对：确认后，有权限的账号能看到这些条目，智能体也会引用", value=False)
+            ts_batch_btn = gr.Button("确认勾选的条目", variant="primary")
+            ts_batch_msg = gr.Markdown("")
+            gr.HTML('<div class="nk-sec">提炼新资料</div>')
+            gr.HTML('<div class="nk-view-sub" style="margin:2px 0 8px;">'
+                    '和每晚 00:00–06:30 的 nikon-kb-extract 是同一个程序（本地模型，Mac 空闲才跑，资料不发云端）。'
+                    '点下去马上开一轮（默认最多 90 分钟）；每晚定时器的时间不变。已停用的旧抽取服务不会再启动。</div>')
+            ts_extract_btn = gr.Button("立即抽取新资料")
+            ts_x_msg = gr.Markdown("")
+        gr.HTML('<div class="nk-sec">全部条目</div>')
         ts_msg = gr.Markdown("")
         ts_df = gr.Dataframe(interactive=False, wrap=True, max_height=420)
         ts_pick = gr.Dropdown(label="查看条目", choices=[])
@@ -1403,8 +1537,10 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
             ts_e_notes = gr.Textbox(label="备注", lines=1)
             with gr.Row():
                 ts_save_btn = gr.Button("保存", variant="primary")
-                ts_extract_btn = gr.Button("立即抽取新资料")
+                ts_confirm_btn = gr.Button("确认这条（生效）")
+                ts_reject_btn = gr.Button("驳回这条")
             ts_e_msg = gr.Markdown("")
+        ts_cur = gr.State(None)
 
     # ── 视图：审计（仅管理员，导航按钮默认隐藏，登录后由 _reveal_admin 放出）──
     with gr.Column(visible=False) as view_admin:
@@ -1490,14 +1626,29 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
     sop_pick.change(sop_detail, [sop_pick], [sop_md]).then(lambda: "", None, [sop_org])
     sop_org_btn.click(sop_organize, [sop_pick, sop_q], [sop_org], concurrency_limit=2, concurrency_id="sop_org")
     _ts_filters = [ts_f_machine, ts_f_unit, ts_f_status, ts_f_kw, ts_f_origin]
-    nav_ts.click(lambda: _switch_view("ts"), None, _nav_out).then(ts_query, _ts_filters, [ts_msg, ts_df, ts_pick])
-    ts_btn.click(ts_query, _ts_filters, [ts_msg, ts_df, ts_pick])
-    ts_f_kw.submit(ts_query, _ts_filters, [ts_msg, ts_df, ts_pick])
-    ts_pick.change(ts_detail, [ts_pick], [ts_md, ts_e_title, ts_e_unit, ts_e_code, ts_e_rcs, ts_e_sols,
-                                          ts_e_dets, ts_e_proc, ts_e_notes, ts_e_status])
-    ts_save_btn.click(ts_save, [ts_pick, ts_e_title, ts_e_unit, ts_e_code, ts_e_rcs, ts_e_sols, ts_e_dets,
-                                ts_e_proc, ts_e_notes, ts_e_status], [ts_e_msg])
-    ts_extract_btn.click(ts_run_extract, None, [ts_e_msg])
+    _ts_queue_in = [ts_f_machine, ts_f_unit, ts_f_kw, ts_f_origin]
+    _ts_main_out = [ts_msg, ts_df, ts_pick]
+    _ts_queue_out = [ts_q_msg, ts_q_df, ts_q_pick, ts_q_multi]
+    _ts_form = [ts_md, ts_e_title, ts_e_unit, ts_e_code, ts_e_rcs, ts_e_sols,
+                ts_e_dets, ts_e_proc, ts_e_notes, ts_e_status, ts_cur]
+    nav_ts.click(lambda: _switch_view("ts"), None, _nav_out).then(
+        ts_query, _ts_filters, _ts_main_out).then(ts_queue, _ts_queue_in, _ts_queue_out)
+    ts_btn.click(ts_query, _ts_filters, _ts_main_out).then(ts_queue, _ts_queue_in, _ts_queue_out)
+    ts_f_kw.submit(ts_query, _ts_filters, _ts_main_out).then(ts_queue, _ts_queue_in, _ts_queue_out)
+    ts_pick.change(ts_open, [ts_pick], _ts_form)
+    ts_q_pick.change(ts_open, [ts_q_pick], _ts_form)
+    ts_save_btn.click(ts_save, [ts_cur, ts_e_title, ts_e_unit, ts_e_code, ts_e_rcs, ts_e_sols, ts_e_dets,
+                                ts_e_proc, ts_e_notes, ts_e_status], [ts_e_msg]).then(
+        ts_query, _ts_filters, _ts_main_out).then(ts_queue, _ts_queue_in, _ts_queue_out)
+    ts_confirm_btn.click(ts_confirm_open, [ts_cur, ts_e_title, ts_e_unit, ts_e_code, ts_e_rcs, ts_e_sols,
+                                           ts_e_dets, ts_e_proc, ts_e_notes], [ts_e_msg]).then(
+        ts_query, _ts_filters, _ts_main_out).then(ts_queue, _ts_queue_in, _ts_queue_out)
+    ts_reject_btn.click(ts_reject_open, [ts_cur], [ts_e_msg]).then(
+        ts_query, _ts_filters, _ts_main_out).then(ts_queue, _ts_queue_in, _ts_queue_out)
+    ts_batch_btn.click(ts_batch_confirm, _ts_filters + [ts_q_multi, ts_q_all, ts_q_ack],
+                       [ts_batch_msg, ts_q_msg, ts_q_df, ts_q_pick, ts_q_multi, ts_q_all, ts_q_ack,
+                        ts_msg, ts_df, ts_pick])
+    ts_extract_btn.click(ts_run_extract, None, [ts_x_msg])
     nav_admin.click(lambda: _switch_view("admin"), None, _nav_out).then(
         do_admin_report, None, [admin_status, admin_perms, admin_log]).then(
         adm_users, None, [adm_users_df, adm_pick])
@@ -1518,7 +1669,7 @@ with gr.Blocks(title="Nikon Expert") as demo:   # gradio 6：theme/css 在 launc
                          [adm_docs_msg, adm_docs_df, adm_picked])
     adm_pv_btn.click(adm_preview, [adm_pv_user], [adm_pv_msg, adm_pv_vis, adm_pv_hid])
     # 审计按钮默认隐藏，页面加载时只给管理员/审计员放出（2026-10-14 用户要求恢复）
-    demo.load(_reveal_admin, None, [nav_admin])
+    demo.load(_reveal_admin, None, [nav_admin, ts_queue_box])
     new_btn.click(lambda: _switch_view("chat") + [[], "", ""],
                   None, _nav_out + [chatbot, question, citation_buttons])
 

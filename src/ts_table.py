@@ -10,6 +10,7 @@
 
 发生次数：同一份资料里相隔 ≤3 天的记录算一次（日志每天往下抄）；隔得久的算新的一次；不同资料（不同现场）分开算。
 审核：抽取出的案例和条目先「待确认」，管理员在网页确认后才给其他账号看、才被智能体引用；
+      可以打开一条改完再确认或驳回，也可以核对后把仍是「待确认」的几条一起确认。
       人工改过的条目不被自动更新覆盖，有新案例时标 has_new 提醒复核。
 权限：需要「故障履历」类别 + 对应机型；客户来源的案例只给有该客户权限的人看。
 数据在 data/ts_table.db（独立库，不和全文检索抢锁）。
@@ -701,6 +702,14 @@ def _visible(user, e, admin: bool, conn=None) -> bool:
     return True
 
 
+def pending_queue(user=None, admin=False, machine="", unit="", keyword="", origin="") -> list:
+    """待确认队列。状态固定是 pending，其它筛选和 search 一样。按更新时间从早到晚，方便先审先到的。"""
+    rows = search(user, admin=admin, machine=machine, unit=unit, status="pending",
+                  keyword=keyword, origin=origin)
+    rows.sort(key=lambda e: ((e.get("updated_at") or ""), e["id"]))
+    return rows
+
+
 def search(user=None, admin=False, machine="", unit="", status="", keyword="", want_models=None, limit=5000,
            origin="") -> list:
     c = _conn()
@@ -771,6 +780,86 @@ def save_entry(admin: str, eid: int, **fields) -> str:
     except Exception:
         pass
     return f"✅ 已保存条目 #{eid}" + ("，已确认（有权限的账号可见、智能体会引用）" if sets.get("status") == "confirmed" else "")
+
+
+def _as_bool(v) -> bool:
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
+
+
+def _id_list(values) -> list:
+    if values is None or values == "":
+        return []
+    if isinstance(values, (int, str)):
+        values = [values]
+    out = []
+    for x in values:
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            continue
+        if n > 0 and n not in out:
+            out.append(n)
+    return out
+
+
+def review_batch_ids(acked, use_all, selected, filtered_ids) -> tuple:
+    """批量确认前的闸门。返回 (错误提示, 要确认的 id)。
+
+    没勾「我已核对」就不返回 id，避免手滑一次确认一整屏。
+    use_all 用当前筛选出来的待确认 id，忽略勾选；否则只用勾选。
+    """
+    if not _as_bool(acked):
+        return ("⚠️ 先勾选「我已核对」。确认后这些条目会给有权限的账号看，智能体也会引用。", [])
+    if _as_bool(use_all):
+        ids = _id_list(filtered_ids)
+        if not ids:
+            return ("当前筛选下没有待确认条目。", [])
+        return ("", ids)
+    ids = _id_list(selected)
+    if not ids:
+        return ("⚠️ 先勾选要确认的条目，或勾选「确认当前筛选出的全部待确认」。", [])
+    return ("", ids)
+
+
+def confirm_entries(admin: str, eids) -> dict:
+    """把仍是「待确认」的条目确认掉。已确认、已驳回、找不到的都不改。
+
+    和 save_entry(status=confirmed) 一样：记成人工确认过（edited=1），清掉 has_new，
+    名下案例的 review 改成 confirmed。其它账号和智能体只看 status=confirmed 的条目。
+    """
+    ids = _id_list(eids)
+    confirmed, skipped, missing = [], [], []
+    if not ids:
+        return {"confirmed": confirmed, "skipped": skipped, "missing": missing}
+    c = _conn()
+    try:
+        now = _now()
+        for eid in ids:
+            e = c.execute("SELECT id, status FROM ts_entries WHERE id=?", (eid,)).fetchone()
+            if not e:
+                missing.append(eid)
+                continue
+            if (e["status"] or "") != "pending":
+                skipped.append(eid)
+                continue
+            c.execute("""UPDATE ts_entries
+                         SET status='confirmed', edited=1, has_new=0, edited_by=?, updated_at=?
+                         WHERE id=?""", (admin or "", now, eid))
+            c.execute("UPDATE ts_cases SET review='confirmed' WHERE entry_id=?", (eid,))
+            confirmed.append(eid)
+        c.commit()
+    finally:
+        c.close()
+    if confirmed:
+        try:
+            from src import audit
+            shown = ",".join(str(i) for i in confirmed[:30])
+            audit.log(admin or "", f"批量确认 Troubleshooting {len(confirmed)} 条：{shown}"[:200], ok=True)
+        except Exception:
+            pass
+    return {"confirmed": confirmed, "skipped": skipped, "missing": missing}
 
 
 def lookup_for_agent(query: str, user, want_models=None, k: int = 4) -> str:

@@ -1,5 +1,6 @@
+# 已停用（2026-10-17 起）。不要 enable。提炼改由 nikon-kb-extract.timer 在北京 00:00～06:30 跑。
 [Unit]
-Description=每天北京 04:30 抽取一次 Troubleshooting 表新案例
+Description=每天北京 04:30 抽取一次 Troubleshooting 表新案例（已停用，勿启用）
 
 [Timer]
 OnCalendar=*-*-* 20:30:00

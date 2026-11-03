@@ -35,7 +35,7 @@ local files ─manual─┘   (PDF/Word/Excel/md, OCR,           ├→ SOP cata
 
 - **Sources**: self-written, continuously updated notes live in Feishu; manuals, PDFs, spreadsheets and diagrams live in WPS. Changed files replace old versions; deletions are synced.
 - **Query**: abbreviations are expanded before retrieval (RR → Reticle Rotation); the named machine model is preferred; up to 3 questions are answered concurrently.
-- **Nightly distillation** (`nikon-kb-extract.timer`, 00:00–06:30 Beijing time): runs only when the user's Mac is online and idle, using a local gemma4 model over Tailscale — documents never leave our own devices. Field logs → field cases; manuals / Japanese check sheets → OEM entries; SOPs → classified by unit. Identical content is processed once; work logs are tracked per day, so only new or edited days are processed.
+- **Nightly distillation** (`nikon-kb-extract.timer`, 00:00–06:30 Beijing time): runs only when the user's Mac is online and idle, using a local gemma4 model over Tailscale — documents never leave our own devices. Field logs → field cases; manuals / Japanese check sheets → OEM entries; SOPs → classified by unit. Identical content is processed once; work logs are tracked per day, so only new or edited days are processed. New rows stay pending until an admin confirms them. The Troubleshooting page has a pending-review queue (open one row to edit, confirm, or reject; batch-confirm only after an explicit check). “立即抽取新资料” starts the same `scripts/kb_extract.py` for one bounded run and does not start the retired `nikon-ts-extract` service. The nightly window is unchanged.
 
 ## Cloud model policy (confidentiality)
 
