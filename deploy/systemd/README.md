@@ -3,6 +3,8 @@
 | 文件 | 作用 |
 |---|---|
 | nikon-circuit-recognize.service / .timer | 电路图识图后台任务（`scripts/circuit_recognize.py`）。同步入库新电路图时立刻触发，定时器每天 19:30 UTC（北京 03:30）兜底 |
+| nikon-kb-extract.service / .timer | 夜间提炼（`scripts/kb_extract.py`）。北京 00:00～06:30 每半小时试一次，Mac 在线且空闲才用本地模型。这是现在的提炼任务 |
+| ~~nikon-ts-extract.service / .timer~~ | 已停用。原来用 deepseek 抽 Troubleshooting 表，改由上面的 kb-extract 做。不要再 enable |
 
 安装：
 ```
@@ -13,12 +15,19 @@ systemctl daemon-reload && systemctl enable --now nikon-circuit-recognize.timer
 
 其他服务（nikon-expert、nikon-mcp、nikon-wps-sync、nikon-feishu-refresh）的配置目前只在服务器上，见 CLAUDE.md 第 1 节。
 
-## nikon-ts-extract（Troubleshooting 表，2026-10-15）
+## nikon-kb-extract（夜间提炼，现行）
 
-每天北京 04:30（UTC 20:30）从故障履历 / 工作日志 / 客户报告里抽取新案例、归并成条目；网页「Troubleshooting 表」页管理员也能点「立即抽取新资料」手动触发。
+北京时间 00:00～06:30（UTC 16:00～22:30）每半小时试一次。Mac 不在线或正在用就跳过，做过的内容不重做。大批量提炼走本地模型，不用 deepseek。
 
-    cp deploy/systemd/nikon-ts-extract.* /etc/systemd/system/
-    systemctl daemon-reload && systemctl enable --now nikon-ts-extract.timer
+    cp deploy/systemd/nikon-kb-extract.* /etc/systemd/system/
+    systemctl daemon-reload && systemctl enable --now nikon-kb-extract.timer
+    journalctl -u nikon-kb-extract -n 50
+
+## nikon-ts-extract（已停用，2026-10-17 起）
+
+原来每天北京 04:30 用 deepseek 抽 Troubleshooting 表。这条定时器已停，工作改由 `nikon-kb-extract` 做。单元文件还在仓库里，是为了对照旧机器上的配置，**不要再 enable**。
+
+网页「Troubleshooting 表」里的「立即抽取新资料」仍会去启动 `nikon-ts-extract.service`（`ui/app.py` 的 `ts_run_extract`）。夜里自动跑的不是这个按钮。
 
 ## nikon-feishu-sync（飞书知识库同步，2026-10-16）
 
