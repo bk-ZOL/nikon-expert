@@ -1,5 +1,6 @@
+# 已停用（2026-10-17 起）。夜间提炼改走 nikon-kb-extract。不要 enable 这个单元。
 [Unit]
-Description=Nikon Expert Troubleshooting 表：从履历/日志/客户报告抽取新案例并归并（只处理新增/改过的内容）
+Description=Nikon Expert Troubleshooting 表：从履历/日志/客户报告抽取新案例并归并（已停用，勿启用）
 After=network-online.target
 
 [Service]

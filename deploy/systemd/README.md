@@ -27,7 +27,7 @@ systemctl daemon-reload && systemctl enable --now nikon-circuit-recognize.timer
 
 原来每天北京 04:30 用 deepseek 抽 Troubleshooting 表。这条定时器已停，工作改由 `nikon-kb-extract` 做。单元文件还在仓库里，是为了对照旧机器上的配置，**不要再 enable**。
 
-网页「Troubleshooting 表」里的「立即抽取新资料」仍会去启动 `nikon-ts-extract.service`（`ui/app.py` 的 `ts_run_extract`）。夜里自动跑的不是这个按钮。
+网页「Troubleshooting 表」里的「立即抽取新资料」跑的是同一个 `scripts/kb_extract.py`（默认最多 90 分钟的一轮，Mac 不空闲就停）。不再启动 `nikon-ts-extract.service`。每晚定时器仍按上面的时段自己跑，按钮不会把它重新启用。
 
 ## nikon-feishu-sync（飞书知识库同步，2026-10-16）
 

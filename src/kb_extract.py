@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 
 try:
@@ -343,3 +344,86 @@ def status() -> dict:
     pend = c.execute("SELECT COUNT(*) FROM ts_entries WHERE origin='oem' AND status='pending' AND entry_key LIKE 'oemx|%'").fetchone()[0]
     c.close()
     return {"oem_windows_done": done.get("oem", 0), "oem_items_pending": pend}
+
+
+# 网页「立即抽取新资料」走这里。和 nikon-kb-extract.service 是同一个 scripts/kb_extract.py。
+# 定时器那条单元不带参数，过了北京 06:30 会直接退出；按钮要马上跑，所以带 --minutes。
+# 不改每晚的时段，也不再启动已停用的 nikon-ts-extract。
+RETIRED_EXTRACT_UNIT = "nikon-ts-extract.service"
+MANUAL_EXTRACT_UNIT = "nikon-kb-extract-manual"
+
+
+def _repo_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def manual_minutes(minutes=None) -> float:
+    """手动一轮最长跑多久。默认 90 分钟，上限 8 小时（和夜间服务的 TimeoutStartSec 一样）。"""
+    raw = os.getenv("KB_EXTRACT_NOW_MINUTES", "90") if minutes is None or minutes == "" else minutes
+    val = float(raw)
+    if not (0 < val <= 480):
+        raise ValueError("提炼时长要在 0 到 480 分钟之间")
+    return val
+
+
+def _refuse_retired(argv) -> None:
+    blob = " ".join(str(x) for x in argv)
+    if "ts_extract" in blob or RETIRED_EXTRACT_UNIT in blob:
+        raise RuntimeError("拒绝启动已停用的 nikon-ts-extract")
+
+
+def manual_script_argv(minutes=None) -> list:
+    py = os.environ.get("KB_EXTRACT_PYTHON") or sys.executable
+    script = os.path.join(_repo_root(), "scripts", "kb_extract.py")
+    argv = [py, script, "--minutes", f"{manual_minutes(minutes):g}"]
+    _refuse_retired(argv)
+    return argv
+
+
+def systemd_run_argv(minutes=None) -> list:
+    """临时单元，跑完就收。名字和每晚的 nikon-kb-extract.service 分开，免得两头抢同一个单元。"""
+    return [
+        "systemd-run", "--collect", "--no-block",
+        "--unit", MANUAL_EXTRACT_UNIT,
+        "--description", "Nikon Expert 立即提炼（与 nikon-kb-extract 同一脚本，不改每晚定时器）",
+        "--property", f"WorkingDirectory={_repo_root()}",
+        "--property", "Nice=10",
+        "--",
+        *manual_script_argv(minutes),
+    ]
+
+
+def _spawn_detached(argv) -> str:
+    """没有 systemd-run 时（本机开发）把同一个脚本放到后台。日志默认写到 /tmp。"""
+    import subprocess
+    log_path = os.getenv("KB_EXTRACT_MANUAL_LOG", "/tmp/nikon-kb-extract-manual.log")
+    folder = os.path.dirname(log_path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    log = open(log_path, "a", encoding="utf-8")
+    try:
+        subprocess.Popen(argv, cwd=_repo_root(), stdout=log, stderr=log,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+    finally:
+        log.close()
+    return log_path
+
+
+def start_manual_extract(minutes=None, *, run=None, spawn=None, which=None) -> dict:
+    """后台启动一轮提炼。有 systemd-run 就用它（和定时任务一样脱离网页进程、Nice=10）；没有就直接拉起脚本。"""
+    import shutil
+    import subprocess
+    mins = manual_minutes(minutes)
+    which = which or shutil.which
+    if which("systemd-run"):
+        argv = systemd_run_argv(minutes)
+        run = run or subprocess.run
+        r = run(argv, capture_output=True, text=True)
+        detail = " ".join(x.strip() for x in ((getattr(r, "stderr", None) or ""), (getattr(r, "stdout", None) or "")) if x and x.strip())
+        return {"ok": r.returncode == 0, "via": "systemd-run", "unit": MANUAL_EXTRACT_UNIT,
+                "minutes": mins, "argv": argv, "detail": detail[:300], "log": ""}
+    argv = manual_script_argv(minutes)
+    spawn = spawn or _spawn_detached
+    log = spawn(argv)
+    return {"ok": True, "via": "process", "unit": "", "minutes": mins,
+            "argv": argv, "detail": "", "log": log or ""}
