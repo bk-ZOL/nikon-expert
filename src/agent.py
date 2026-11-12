@@ -287,7 +287,11 @@ def run_agent_sync(question: str, history=None):
             asyncio.run(go())
         except BaseException as e:  # CancelledError 等不是 Exception 子类，漏掉会让 agent 无声结束
             traceback.print_exc()
-            q.put({"kind": "error", "error": f"{type(e).__name__}: {e}"})
+            if getattr(e, "status_code", None) == 402:
+                message = "模型 API 账户余额不足，本次问答已结束。请管理员为当前模型账户充值，或选择已配置且可用的其他模型后重试。刷新页面或重启服务不能解决余额不足。"
+            else:
+                message = f"{type(e).__name__}: {e}"
+            q.put({"kind": "error", "error": message})
         finally:
             q.put(SENTINEL)
 
